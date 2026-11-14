@@ -1,0 +1,94 @@
+# roachHub - 高拟真全面蟑螂模拟器 自动保存的配置文件
+
+
+[app]
+title = "roachHub - 高拟真桌面生物模拟器"
+target_fps = 60
+debug_mode = false
+start_hidden = false
+log_level = "INFO"
+language = "zh_CN"
+hotkey_toggle_visible = "Ctrl+Alt+R"
+hotkey_open_settings = "Ctrl+Alt+S"
+
+[render]
+style = "realistic"
+shadow_intensity = 0.42
+antennae_intensity = 1.0
+
+[window]
+always_on_top = true
+multi_screen = false
+
+[interaction]
+drag_enabled = true
+
+[trails]
+enabled = true
+resolution_scale = 1.0
+fade_seconds = 6.0
+max_prints = 3000
+
+[audio]
+enabled = true
+volume = 0.45
+max_per_second = 18
+
+[grab_voice]
+enabled = true
+volume = 0.5
+file = "assets/sounds/grab.wav"
+stop_on_release = false
+
+[performance]
+fixed_quality = false
+fixed_quality_level = 2
+min_fps = 30
+
+[simulation]
+initial_roaches = 3
+max_roaches = 200
+boundary_padding = 45.0
+boundary_behavior = "rebound"
+food_spawn_interval = 12.0
+max_food_count = 8
+
+[behavior]
+thigmotaxis_weight = 0.55
+grooming_frequency = 0.35
+circadian_rhythm = true
+perception_far_radius = 260.0
+perception_mid_radius = 120.0
+perception_panic_radius = 55.0
+
+[lifecycle]
+reproduce_mode = "auto"
+female_ratio = 0.5
+mating_search_radius = 180.0
+reproduce_min_energy = 55.0
+reproduce_cost_energy = 25.0
+reproduce_cooldown = 14.0
+allow_reproduce_near_cap = true
+ootheca_mode = "random"
+egg_incubation_time = 15.0
+nymphs_per_ootheca_min = 1
+nymphs_per_ootheca_max = 3
+max_instars = 4
+instar_duration = 18.0
+adult_lifespan = 300.0
+
+[creatures]
+
+[creatures.cockroach]
+min_walk_speed = 65.0
+max_walk_speed = 120.0
+panic_speed = 430.0
+panic_duration = 2.4
+normal_turn_rate = 3.8
+panic_turn_rate = 14.0
+base_length = 72.0
+base_width = 38.0
+scale_variation = 0.15
+leg_swing_frequency = 17.0
+energy_decay_rate = 0.6
+starvation_speed_penalty = 0.5

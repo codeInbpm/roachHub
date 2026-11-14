@@ -1,0 +1,14 @@
+{
+  "source": "cockroach_adult.png",
+  "rotate_deg": 0.0,
+  "box": [
+    0.5,
+    0.535,
+    0.192,
+    0.335
+  ],
+  "width": 117,
+  "height": 215,
+  "aspect": 0.5442,
+  "kept_pixels": 16374
+}

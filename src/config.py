@@ -18,13 +18,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "start_hidden": False,
         "log_level": "INFO",
         "language": "zh_CN",
-        "hotkey_toggle_visible": "Ctrl+Alt+R",
-        "hotkey_open_settings": "Ctrl+Alt+S",
+        # 启动即弹出控制台（用户要求：不用先去右下角点托盘图标）
+        "open_console_on_start": True,
+        # 三个**全局**热键（RegisterHotKey，应用没有焦点时也生效）
+        # Ctrl+Alt+W 被微信等程序长期占用，注册必然失败，所以默认用 R/H/B。
+        "hotkey_toggle_console": "Ctrl+Alt+R",
+        "hotkey_toggle_visible": "Ctrl+Alt+H",
+        "hotkey_nest_burst": "Ctrl+Alt+B",
     },
     "render": {
         "style": "realistic",
         "shadow_intensity": 0.42,
         "antennae_intensity": 1.0,
+        # 刚蜕壳的个体先是奶白半透明的新壳，几秒内颜色化回正常色 —— 这是真实
+        # 蟑螂的"嫩壳期"。有人会觉得白色像贴图错误，所以给一个总开关。
+        "show_teneral": True,
     },
     "window": {
         # 点击穿透已统一为 WM_NCHITTEST 原生命中测试（Windows），

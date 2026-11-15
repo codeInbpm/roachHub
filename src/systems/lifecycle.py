@@ -1,12 +1,14 @@
 """生命周期演进系统（卵鞘破壳孵化、若虫蜕皮演进与衰老死亡）。"""
 
 from __future__ import annotations
+import math
 import random
 import logging
 from typing import List, Tuple
 
 from ..entities.base_entity import BaseEntity, LifeStage, EntityState
 from ..entities.cockroach import Cockroach
+from ..entities.exuvia import Exuvia
 from ..entities.ootheca import Ootheca
 from ..utils.math_utils import Vector2D
 
@@ -42,7 +44,7 @@ class LifecycleSystem:
         roach_config: dict,
         max_population: int,
     ) -> List[BaseEntity]:
-        """执行生命周期检查，返回本帧新破壳诞生的若虫列表。"""
+        """执行生命周期检查，返回本帧新诞生的实体（破壳若虫 + 蜕下的空壳）。"""
         newborn_nymphs: List[BaseEntity] = []
 
         all_roaches = [e for e in entities if isinstance(e, Cockroach) and e.is_alive]
@@ -91,7 +93,22 @@ class LifecycleSystem:
                 if entity.stage == LifeStage.NYMPH:
                     if entity.instar_age >= self.instar_duration and entity.state != EntityState.PANIC:
                         old_instar = entity.instar
+                        old_scale = entity.scale
+                        # 空壳留在"脱出来"的位置：新虫是往前拱出来的，旧壳在身后
+                        back = entity.body_len * 0.34 * old_scale
+                        shed_x = entity.pos.x - math.cos(entity.angle) * back
+                        shed_y = entity.pos.y - math.sin(entity.angle) * back
                         entity.advance_instar()
+                        newborn_nymphs.append(
+                            Exuvia(
+                                x=shed_x,
+                                y=shed_y,
+                                angle=entity.angle,
+                                scale=old_scale,
+                                base_width=entity.base_width,
+                                base_height=entity.base_height,
+                            )
+                        )
                         if entity.stage == LifeStage.ADULT:
                             logger.info("🎉 蟑螂 ID=%s (%s) 完成终龄蜕皮，羽化为成虫并长出翅膀！", entity.id, entity.gender)
                         else:

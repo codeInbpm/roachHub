@@ -15,6 +15,7 @@ class ResourceManager:
     """管理图像、图标与高清精灵图贴图资产。"""
 
     _tray_icon: Optional[QIcon] = None
+    _app_icon: Optional[QIcon] = None
     _sprites: Dict[str, Optional[QPixmap]] = {}
 
     @classmethod
@@ -26,17 +27,54 @@ class ResourceManager:
         return cls.get_assets_dir() / "sprites"
 
     @classmethod
+    def get_icons_dir(cls) -> Path:
+        return cls.get_assets_dir() / "icons"
+
+    @classmethod
+    def get_app_icon(cls) -> QIcon:
+        """应用图标（深色圆角徽章）：窗口标题栏 / 任务栏 / 快捷方式。
+
+        由 `tools/make_icon.py` 生成，内含 16~256 七个尺寸。只有它不存在时才退回
+        老的程序化绘制 —— 那个版本 16px 下基本是一团糊。
+        """
+        if cls._app_icon is not None:
+            return cls._app_icon
+
+        ico = cls.get_icons_dir() / "roachhub.ico"
+        if ico.exists():
+            icon = QIcon(str(ico))
+            if not icon.isNull():
+                cls._app_icon = icon
+                return icon
+        cls._app_icon = cls._draw_fallback_icon()
+        return cls._app_icon
+
+    @classmethod
     def get_tray_icon(cls) -> QIcon:
-        """获取系统托盘图标。"""
+        """系统托盘图标：只有虫子本身（16/24px 是可读的矢量剪影）。"""
         if cls._tray_icon is not None:
             return cls._tray_icon
 
-        icon_file = cls.get_assets_dir() / "icons" / "tray_icon.png"
-        if icon_file.exists():
-            cls._tray_icon = QIcon(str(icon_file))
-            return cls._tray_icon
+        ico = cls.get_icons_dir() / "tray_icon.ico"
+        if ico.exists():
+            icon = QIcon(str(ico))
+            if not icon.isNull():
+                cls._tray_icon = icon
+                return icon
 
-        # 动态绘制托盘图标
+        png = cls.get_icons_dir() / "tray_icon.png"
+        if png.exists():
+            icon = QIcon(str(png))
+            if not icon.isNull():
+                cls._tray_icon = icon
+                return icon
+
+        cls._tray_icon = cls._draw_fallback_icon()
+        return cls._tray_icon
+
+    @classmethod
+    def _draw_fallback_icon(cls) -> QIcon:
+        """程序化兜底图标（仅在 assets/icons 缺失时使用）。"""
         pixmap = QPixmap(64, 64)
         pixmap.fill(Qt.GlobalColor.transparent)
 
@@ -70,9 +108,7 @@ class ResourceManager:
         painter.drawEllipse(27, 14, 10, 10)
 
         painter.end()
-
-        cls._tray_icon = QIcon(pixmap)
-        return cls._tray_icon
+        return QIcon(pixmap)
 
     @classmethod
     def get_sprite(cls, sprite_name: str) -> Optional[QPixmap]:

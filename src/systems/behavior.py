@@ -103,6 +103,11 @@ class BehaviorSystem:
         dist = to_cursor.length()
         roach.threat_vector = to_cursor
 
+        # 刚蜕壳的软壳个体只能"感觉到"，不能"做出反应"：不僵直、不避让、不逃窜。
+        # 这既是生物学事实，也顺手掐掉了"鼠标一靠近白虫子它就有反应"的错觉。
+        if roach.molt_timer > 0:
+            return
+
         # 若虫更胆小，感知半径上浮 20%
         scale_mod = 1.2 if roach.stage == LifeStage.NYMPH else 1.0
         r_far = self.r_far * scale_mod
@@ -165,8 +170,9 @@ class BehaviorSystem:
             roach.target_speed = 0.0
             return
 
-        # 蜕皮脱壳中
-        if roach.state == EntityState.MOLTING:
+        # 蜕皮脱壳中（含被抓过之后回到桌面）：软壳期一律原地不动
+        if roach.molt_timer > 0:
+            roach.state = EntityState.MOLTING
             roach.target_speed = 0.0
             return
 

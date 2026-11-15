@@ -8,13 +8,16 @@ debug_mode = false
 start_hidden = false
 log_level = "INFO"
 language = "zh_CN"
-hotkey_toggle_visible = "Ctrl+Alt+R"
-hotkey_open_settings = "Ctrl+Alt+S"
+open_console_on_start = true
+hotkey_toggle_console = "Ctrl+Alt+R"
+hotkey_toggle_visible = "Ctrl+Alt+H"
+hotkey_nest_burst = "Ctrl+Alt+B"
 
 [render]
 style = "realistic"
 shadow_intensity = 0.42
 antennae_intensity = 1.0
+show_teneral = true
 
 [window]
 always_on_top = true
@@ -31,7 +34,7 @@ max_prints = 3000
 
 [audio]
 enabled = true
-volume = 0.45
+volume = 0.55
 max_per_second = 18
 
 [grab_voice]

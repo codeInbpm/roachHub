@@ -55,6 +55,21 @@ class OverlayWindow(QWidget):
         # QRegion 遮罩（低频更新）。详见 utils/win_hit_test.py 的说明。
         self._native_hit_test = supports_native_hit_test()
         self._hit_filter: Optional[ClickThroughFilter] = None
+
+        # 「洞」与「死区」—— 覆盖层必须把这两块地让出来，否则桌面会点不动：
+        #   * hole:     控制台面板所在的矩形（画也不画、点也不接管），
+        #               否则蟑螂爬到面板上就把按钮的点击吃了；
+        #   * work_rect: 屏幕工作区，任务栏 / 托盘永远不在它里面。
+        #               全屏覆盖窗口压在任务栏上时，托盘图标上的每一只蟑螂
+        #               都会变成一块"吃点击的补丁"→ 用户看到的就是"右下角卡住、
+        #               什么都点不了"。实测 WindowFromPoint 在托盘位置返回我们的
+        #               窗口，而空桌面返回 TrayNotifyWnd，就是这个差别。
+        # 洞是**区域**不是矩形：面板被别的窗口挡住一部分时，只有露出来的那部分
+        # 该挖空；被挡住的部分不该挖（否则浏览器前面会出现"看不见但抓不到"的空洞）。
+        self._hole_region: Optional[QRegion] = None
+        self._hole_rect: Optional[QRect] = None
+        self._clip_region: Optional[QRegion] = None
+        self._work_rect: Optional[QRect] = None
         self._mask_timer = 0.0
         self._paint_ms = 0.0
         self._paint_trails_ms = 0.0
@@ -98,9 +113,59 @@ class OverlayWindow(QWidget):
         screen = QGuiApplication.primaryScreen()
         if screen:
             geom = screen.geometry()
+            avail = screen.availableGeometry()
             self.setGeometry(geom)
             self.trails.resize(geom.width(), geom.height())
-            logger.info("覆盖窗口已匹配屏幕尺寸: %dx%d", geom.width(), geom.height())
+            # 工作区（本地坐标）：任务栏露出来的那条永远不接管鼠标
+            self._work_rect = avail.translated(-geom.topLeft())
+            self._rebuild_clip()
+            logger.info("覆盖窗口已匹配屏幕尺寸: %dx%d（工作区 %dx%d）",
+                        geom.width(), geom.height(), avail.width(), avail.height())
+
+    # -------------------------------------------------------- 洞与死区
+
+    def set_hole_rect(self, rect: Optional[QRect]) -> None:
+        """设定"让位矩形"（窗口内坐标）：控制台面板占的地方。
+
+        None = 没有洞。只在控制台显示/移动/缩放/隐藏时调用，不是每帧。
+        """
+        region = QRegion(QRect(rect)) if rect is not None else None
+        self.set_hole_region(region)
+
+    def set_hole_region(self, region: Optional[QRegion]) -> None:
+        """设定"让位区域"（窗口内坐标）：面板真正露出来的那几块。
+
+        传 None 或空区域 = 整屏都归蟑螂（面板没露着的时候必须这样，否则屏幕上
+        会留下一个"虫子走进去就消失"的洞 —— 那正是用户报的问题）。
+        """
+        if region is not None and region.isEmpty():
+            region = None
+        prev = self._hole_region
+        if prev is None and region is None:
+            return
+        if prev is not None and region is not None and prev == region:
+            return
+        self._hole_region = region
+        self._hole_rect = region.boundingRect() if region is not None else None
+        self._rebuild_clip()
+        self.update()
+
+    def hole_rect(self) -> Optional[QRect]:
+        return self._hole_rect
+
+    def hole_region(self) -> Optional[QRegion]:
+        return self._hole_region
+
+    def _rebuild_clip(self) -> None:
+        """预算好绘制裁剪区（整屏减去洞）。每帧只 setClipRegion，不重算。"""
+        if self._hole_region is None:
+            self._clip_region = None
+        else:
+            self._clip_region = QRegion(self.rect()).subtracted(self._hole_region)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 (Qt 命名)
+        super().resizeEvent(event)
+        self._rebuild_clip()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -132,10 +197,15 @@ class OverlayWindow(QWidget):
 
         combined = QRegion()
         for entity in self.entities:
-            if not entity.is_alive:
+            if not entity.is_alive or not entity.interactive:
                 continue
             rect = entity.get_bounding_rect().toRect()
             combined = combined.united(QRegion(rect.adjusted(-4, -4, 4, 4)))
+        # 同样要让出任务栏与控制台面板（Windows 走 NCHITTEST，这里是别的平台兜底）
+        if self._work_rect is not None:
+            combined = combined.intersected(QRegion(self._work_rect))
+        if self._hole_region is not None:
+            combined = combined.subtracted(self._hole_region)
         self.setMask(combined)
 
     def tick_mask(self, dt: float) -> None:
@@ -188,9 +258,22 @@ class OverlayWindow(QWidget):
 
         两次筛：先用平方距离砍掉绝大多数（不做 sqrt / 三角函数），再对候选做
         旋转椭圆精确判定。200 只同屏时单次命中测试约 0.1ms，鼠标移动时才会调用。
+
+        先过两道闸门：
+        1. 落在控制台面板的洞 → 一律不认（让点击直达按钮）；
+        2. 落在任务栏 / 托盘（非工作区）→ 一律不认。
+        这两处如果让蟑螂"认领"，用户就会觉得那块屏幕卡死了。
         """
+        ix, iy = int(x), int(y)
+        hole = self._hole_region
+        if hole is not None and hole.contains(QPoint(ix, iy)):
+            return None
+        work = self._work_rect
+        if work is not None and not work.contains(ix, iy):
+            return None
+
         for entity in reversed(self.entities):
-            if not entity.is_alive:
+            if not entity.is_alive or not entity.interactive:
                 continue
             dx = x - entity.pos.x
             dy = y - entity.pos.y
@@ -290,12 +373,23 @@ class OverlayWindow(QWidget):
         self._paint_calls += 1
         painter = QPainter(self)
         try:
+            # 控制台面板那块挖空：蟑螂走到面板边缘就"钻到下面去"，
+            # 既不会盖住文字，也不会抢走按钮的点击。
+            clip = self._clip_region
+            if clip is not None:
+                painter.setClipRegion(clip)
+
             # 0. 足迹与油渍（最底层，压在所有实体下面）
             _t = time.perf_counter()
             self.trails.render(painter)
             self._paint_trails_ms = (time.perf_counter() - _t) * 1000.0
 
             # 1. 绘制底层食物
+            for entity in self.entities:
+                if entity.is_alive and entity.__class__.__name__ == "Exuvia":
+                    # 蜕下的空壳躺在桌面上，压在蟑螂下面、盖在痕迹上面
+                    entity.render(painter)
+
             for entity in self.entities:
                 if entity.is_alive and entity.__class__.__name__ == "Food":
                     entity.render(painter)

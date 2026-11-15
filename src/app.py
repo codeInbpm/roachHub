@@ -5,14 +5,14 @@ import sys
 import time
 import random
 import logging
-from typing import List, Optional
+from typing import Callable, List, Optional
 
-from PySide6.QtCore import QObject, QTimer, QPoint, Qt
-from PySide6.QtGui import QCursor
+from PySide6.QtCore import QObject, QTimer, QPoint, QRect, Qt
+from PySide6.QtGui import QCursor, QRegion
 from PySide6.QtWidgets import QApplication
 
 from .config import Config
-from .entities.base_entity import BaseEntity, LifeStage
+from .entities.base_entity import BaseEntity, EntityState, LifeStage
 from .entities.cockroach import Cockroach
 from .entities.ootheca import Ootheca
 from .entities.food import Food
@@ -27,6 +27,8 @@ from .systems.reproduction import ReproductionSystem
 from .systems.ecology import EcologySystem
 from .systems.audio import ScuttleAudio
 from .systems.voice import GrabVoice
+from .utils.hotkeys import GlobalHotkeyManager, supports_global_hotkeys
+from .utils.win_occlusion import covered_rects
 from .utils.math_utils import Vector2D
 
 logger = logging.getLogger("roachHub.app")
@@ -34,6 +36,9 @@ logger = logging.getLogger("roachHub.app")
 
 class RoachApp(QObject):
     """协调窗口、系统与生物生命周期的总控制器。"""
+
+    # 一次"虫巢爆发"最多补这么多只，防止把 max_roaches 误设成 9999 时一次卡死
+    BURST_HARD_LIMIT = 400
 
     def __init__(self, qapp: QApplication) -> None:
         super().__init__()
@@ -45,6 +50,9 @@ class RoachApp(QObject):
         self._settings_window: Optional[SettingsWindow] = None
         self._food_timer: float = 0.0
         self._cursor_pos: Vector2D = Vector2D(0.0, 0.0)
+
+        # 「刚蜕皮的奶白色嫩壳」是否展示（设置里可关）：类级开关，所有个体共享
+        Cockroach.show_teneral = bool(self.config.get("render.show_teneral", True))
 
         # 初始化子系统
         screen_geom = self.qapp.primaryScreen().geometry()
@@ -106,11 +114,18 @@ class RoachApp(QObject):
             on_spawn_roach=self.spawn_cockroach,
             on_spawn_food=self.spawn_food,
             on_clear_roaches=self.clear_all,
-            on_open_settings=self.open_settings,
+            on_open_settings=self.summon_console,
             on_quit=self.quit,
             on_clear_trails=self.clear_trails,
             on_toggle_audio=self.toggle_audio,
+            on_spawn_roaches=self.spawn_batch,
+            on_spawn_foods=self.spawn_foods,
+            on_nest_burst=self.nest_burst,
         )
+
+        # 全局热键（RegisterHotKey）：应用没有焦点时也能召唤控制台/放虫。
+        # 注意只在 start() 里真正注册 —— 单元测试构造 RoachApp 时不应该去抢系统热键。
+        self.hotkeys = GlobalHotkeyManager()
 
         self.target_fps = int(self.config.get("app.target_fps", 60))
         self.timer = QTimer(self)
@@ -119,6 +134,12 @@ class RoachApp(QObject):
         self.timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.timer.timeout.connect(self._on_tick)
         self._last_tick_time = time.perf_counter()
+
+        # 控制台的"洞"要跟着窗口 z-order 走：面板沉到浏览器后面时必须撤销挖洞，
+        # 否则屏幕上会留一块"虫子走进去就消失"的矩形。4Hz 足够，别拖累主循环。
+        self._console_hole_timer = QTimer(self)
+        self._console_hole_timer.setInterval(250)
+        self._console_hole_timer.timeout.connect(self._poll_console_hole)
 
         # ---- 帧预算自适应（保证"不管多少只，都不会把 UI 卡死"）----
         # 逻辑：先降画质（LOD2→1→0），画质见底还不达标就降帧率。
@@ -165,7 +186,81 @@ class RoachApp(QObject):
         self.timer.start(interval_ms)
 
         self._update_tray_counts()
+
+        # 全局热键必须在消息循环起来之前装好
+        self.hotkeys.install()
+        self.register_hotkeys()
+
+        self._console_hole_timer.start()
+
+        # 默认直接弹出控制台（不用先去右下角翻托盘菜单）
+        if bool(self.config.get("app.open_console_on_start", True)):
+            self.open_settings()
+
         logger.info("模拟主循环已启动，当前目标帧率: %d FPS", self.target_fps)
+
+    # ---------------------------------------------------------------- 热键
+
+    def register_hotkeys(self) -> dict[str, str]:
+        """按配置重新注册三个全局热键。返回 {逻辑名: 失败原因}（空 = 全部成功）。"""
+        self.hotkeys.clear()
+        self.hotkeys.bind(
+            "console",
+            str(self.config.get("app.hotkey_toggle_console", "Ctrl+Alt+R")),
+            lambda: self._guarded(self.toggle_console),
+        )
+        self.hotkeys.bind(
+            "visible",
+            str(self.config.get("app.hotkey_toggle_visible", "Ctrl+Alt+H")),
+            lambda: self._guarded(self.toggle_visibility),
+        )
+        self.hotkeys.bind(
+            "burst",
+            str(self.config.get("app.hotkey_nest_burst", "Ctrl+Alt+B")),
+            lambda: self._guarded(self.nest_burst),
+        )
+        if self.hotkeys.failures:
+            logger.warning("部分全局热键未生效：%s", self.hotkeys.failures)
+        self._sync_hotkey_hints()
+        return dict(self.hotkeys.failures)
+
+    def _guarded(self, action: Callable[[], object]) -> None:
+        """热键动作守门：正在控制台里录制热键时不要真的执行。
+
+        否则用户点开"显示/隐藏控制台"的录入框、按下当前那个组合键，窗口会当场
+        被自己藏起来 —— 录音时不能把自己静音，同一个道理。
+        """
+        if self._recording_hotkey():
+            logger.debug("正在录制热键，忽略本次全局热键")
+            return
+        action()
+
+    def _recording_hotkey(self) -> bool:
+        w = self._settings_window
+        if w is None or not w.isVisible() or not w.isActiveWindow():
+            return False
+        from PySide6.QtWidgets import QApplication, QKeySequenceEdit
+
+        return isinstance(QApplication.focusWidget(), QKeySequenceEdit)
+
+    def hotkey_status(self) -> dict[str, dict[str, str | bool]]:
+        """给控制台显示用：每个热键的规范串 / 是否注册成功 / 失败原因。"""
+        out: dict[str, dict[str, str | bool]] = {}
+        for name in ("console", "visible", "burst"):
+            out[name] = {
+                "spec": self.hotkeys.spec_of(name),
+                "ok": self.hotkeys.is_registered(name),
+                "error": self.hotkeys.failures.get(name, ""),
+            }
+        return out
+
+    def _sync_hotkey_hints(self) -> None:
+        """把热键文案同步到托盘菜单，用户不用翻设置也知道按什么。"""
+        self.tray.set_hotkey_hints(
+            console=self.hotkeys.spec_of("console"),
+            visible=self.hotkeys.spec_of("visible"),
+            burst=self.hotkeys.spec_of("burst"),
+        )
 
     def spawn_cockroach(
         self,
@@ -173,6 +268,7 @@ class RoachApp(QObject):
         y: float | None = None,
         stage: LifeStage = LifeStage.ADULT,
         gender: Optional[str] = None,
+        announce: bool = True,
     ) -> Cockroach:
         """在屏幕内生成一只蟑螂。"""
         screen_geom = self.qapp.primaryScreen().geometry()
@@ -209,8 +305,12 @@ class RoachApp(QObject):
         roach.on_sound = self._on_sound
         self.entities.append(roach)
 
-        logger.info("生成蟑螂: ID=%s (阶段: %s, 性别: %s, 风格: %s)", roach.id, stage.name, gender, render_style)
-        self._update_tray_counts()
+        if announce:
+            logger.info("生成蟑螂: ID=%s (阶段: %s, 性别: %s, 风格: %s)",
+                        roach.id, stage.name, gender, render_style)
+            self._update_tray_counts()
+        else:
+            logger.debug("批量生成蟑螂: ID=%s (%s/%s)", roach.id, stage.name, gender)
         return roach
 
     def spawn_food(self, x: float | None = None, y: float | None = None) -> Food:
@@ -242,11 +342,109 @@ class RoachApp(QObject):
         logger.info("投放食物碎屑: ID=%s (坐标: %.1f, %.1f)", food.id, x, y)
         return food
 
+    # ---------------------------------------------------------------- 批量投放
+
+    def alive_roach_count(self) -> int:
+        return sum(1 for e in self.entities if isinstance(e, Cockroach) and e.is_alive)
+
+    def roach_capacity(self) -> int:
+        """还能再放多少只（受 simulation.max_roaches 与 BURST_HARD_LIMIT 双重限制）。"""
+        cap = int(self.config.get("simulation.max_roaches", 15))
+        cap = min(cap, self.BURST_HARD_LIMIT)
+        return max(0, cap - self.alive_roach_count())
+
+    def spawn_batch(
+        self,
+        count: int = 10,
+        stage: LifeStage | None = None,
+        panic: bool = False,
+    ) -> list[Cockroach]:
+        """一次投放多只。
+
+        :param count: 想要的数量；会被"剩余容量"截断（不会突破 max_roaches）
+        :param stage: None = 混合（约 1/3 若虫），否则全部用指定阶段
+        :param panic: True 时新生个体立刻受惊逃窜（虫巢爆发用）
+
+        为什么不复用循环调 `spawn_cockroach` 就完事：那条路径每只都会打一条 INFO 日志
+        并刷新托盘，一次 150 只就是 150 行日志 + 150 次托盘重绘。
+        """
+        want = max(0, int(count))
+        room = self.roach_capacity()
+        n = min(want, room)
+        if n <= 0:
+            logger.info("批量投放被忽略：已满（上限 %s 只）", self.config.get("simulation.max_roaches"))
+            return []
+
+        max_instars = int(self.config.get("lifecycle.max_instars", 4))
+        females_bias = float(self.config.get("lifecycle.female_ratio", 0.5))
+        out: list[Cockroach] = []
+        for _ in range(n):
+            if stage is None:
+                # 混合群落更像真巢：若虫占三分之一，成虫里外雌雄各半
+                use_stage = LifeStage.NYMPH if random.random() < 0.34 else LifeStage.ADULT
+            else:
+                use_stage = stage
+            gender = "female" if random.random() < females_bias else "male"
+
+            roach = self.spawn_cockroach(stage=use_stage, gender=gender, announce=False)
+            if use_stage == LifeStage.NYMPH:
+                # 让若虫体型随机分布在各龄期，别一堆同样大小
+                roach.instar = random.randint(1, max(1, max_instars))
+                roach._refresh_appearance_by_stage()
+            if panic:
+                roach.panic_timer = 3.0
+                roach.state = EntityState.PANIC
+                roach.target_speed = roach.panic_speed
+                roach.angle = roach.target_angle = Vector2D.random_direction().angle()
+            out.append(roach)
+
+        logger.info("批量投放 %d 只（请求 %d，剩余容量 %d）", n, want, room)
+        self._tray_update_at = 0.0        # 强制下一次统计立刻刷新，别等 0.5s 节流
+        self._update_tray_counts()
+        return out
+
+    def spawn_foods(self, count: int = 5) -> list[Food]:
+        """批量投放食物碎屑。"""
+        n = max(1, min(int(count), 40))
+        out = [self.spawn_food() for _ in range(n)]
+        logger.info("批量投放 %d 块食物", n)
+        return out
+
+    def nest_burst(self) -> int:
+        """虫巢爆发：一键把桌面补到上限，并让整个巢炸开（全部受惊四散）。
+
+        :return: 本次新增的只数（已达上限时为 0，但仍然会"炸"一次）
+
+        语义选择：**补满**而不是"重置成满"。用户已经养了 50 只，他要的是"再来一波"，
+        不是"把现有的清掉重来" —— 后者会让他刚放的那几只凭空消失。
+        """
+        alive = self.alive_roach_count()
+        room = self.roach_capacity()
+        spawned = self.spawn_batch(room, stage=None, panic=False) if room > 0 else []
+
+        # 无论是否新增，都让全场炸开一次：这是"爆发"该有的观感
+        self._burst_panic(2.6)
+        if self.audio.enabled and self.audio.available:
+            self.audio.play("rustle", 0.55)
+
+        cap = min(int(self.config.get("simulation.max_roaches", 15)), self.BURST_HARD_LIMIT)
+        logger.info("虫巢爆发：%d → %d 只（上限 %d）", alive, self.alive_roach_count(), cap)
+        return len(spawned)
+
+    def _burst_panic(self, duration: float = 2.6) -> None:
+        """以屏幕中心为惊源，让所有个体瞬间僵直后向四周逃窜。"""
+        geom = self.qapp.primaryScreen().geometry()
+        center = Vector2D(geom.width() / 2.0, geom.height() / 2.0)
+        for e in self.entities:
+            if isinstance(e, Cockroach) and e.is_alive and e.state != EntityState.DRAGGED:
+                e.trigger_freeze_and_panic(center, duration)
+
     def clear_all(self) -> None:
         for e in self.entities:
             self.behavior_system.cleanup_entity(e.id)
         self.entities.clear()
         self.overlay.set_entities([])
+        self._tray_update_at = 0.0
         self._update_tray_counts()
         logger.info("已清空所有物体")
 
@@ -263,11 +461,158 @@ class RoachApp(QObject):
                 on_applied=self.apply_runtime_settings,
                 on_clear_trails=self.clear_trails,
                 on_preview_voice=self.preview_grab_voice,
+                on_nest_burst=self.nest_burst,
+                on_spawn_roaches=self.spawn_batch,
+                on_spawn_foods=self.spawn_foods,
+                on_clear_all=self.clear_all,
+                on_query_stats=self.console_stats,
+                on_toggle_sim_visible=self.toggle_visibility,
             )
-        self._settings_window.load_from_config()
-        self._settings_window.show()
-        self._settings_window.activateWindow()
-        self._settings_window.raise_()
+            self._settings_window.geometry_changed.connect(self._sync_console_hole)
+        w = self._settings_window
+        # 最小化过就必须先还原：show() 对"已可见但最小化"的窗口是无操作，
+        # 用户点托盘会以为程序死了。
+        if w.isMinimized():
+            w.setWindowState(w.windowState() & ~Qt.WindowState.WindowMinimized)
+        if not w.isVisible():
+            # 只在"重新弹出"时回读配置；已经开着就别 reload —— 否则用户没点的修改会被抹掉
+            w.load_from_config()
+        w.show()
+        w.raise_()
+        w.activateWindow()
+        self._sync_console_hole()
+        # raise_() 之后 z-order 才真正生效，隔一拍再算一次，免得洞算成"还被压着"
+        QTimer.singleShot(60, self._poll_console_hole)
+        # 建窗口 / 首次布局会卡住消息循环上百毫秒，别让自适应器把这当成"性能不够"
+        self.reset_frame_governor()
+
+    def _sync_console_hole(self) -> None:
+        """把控制台**真正露出来**的那几块告诉覆盖层，让它在绘制和命中上"挖空"。
+
+        没有这一步，蟑螂会爬到面板上：看起来只是难看，实际是**按钮点不动** ——
+        覆盖层比面板更靠前，蟑螂身上的点击会被它吃掉。
+
+        但洞必须跟着"面板是不是还在最前面"走：面板是普通窗口，用户点一下浏览器它就
+        沉到后面去了。如果洞还留在原地，屏幕上就出现一个**虫子走进去就消失**的矩形
+        （面板被挡住，用户只能看到洞）。所以这里先减去压在上面的窗口矩形。
+        """
+        w = self._settings_window
+        hidden = w is None or not w.isVisible() or w.isMinimized()
+        if hidden:
+            self.overlay.set_hole_region(None)
+            return
+        r = w.frameGeometry()
+        if r.width() <= 0 or r.height() <= 0:
+            self.overlay.set_hole_region(None)
+            return
+
+        # 多让 4px：窗口阴影/圆角边缘也归面板，别在边框上留一条"能吃点击"的缝
+        region = QRegion(QRect(r).adjusted(-4, -4, 4, 4))
+        for cover in covered_rects(int(w.winId()), r):
+            region = region.subtracted(QRegion(cover))
+        if region.isEmpty():
+            # 面板被完全挡住（例如最大化浏览器压在上面）：整屏都归蟑螂
+            self.overlay.set_hole_region(None)
+            return
+
+        offset = self.overlay.mapFromGlobal(QPoint(0, 0))
+        self.overlay.set_hole_region(region.translated(offset.x(), offset.y()))
+
+    def _poll_console_hole(self) -> None:
+        """低频重算洞（4Hz）：面板被抬起/压住时，洞要跟着变化。"""
+        if self._settings_window is None:
+            return
+        try:
+            self._sync_console_hole()
+        except Exception:
+            logger.debug("重算控制台洞失败", exc_info=True)
+
+    def summon_console(self) -> bool:
+        """托盘单击 / 菜单「打开控制台」：**总是**把它叫出来，不做可见性取反。
+
+        托盘图标被点的时候用户期待的是"把面板拿来"，而不是"如果开着就收起来" ——
+        后者在面板被别的窗口挡住时，表现就是"点了没反应"。
+        """
+        self.open_settings()
+        return True
+
+    def reset_frame_governor(self) -> None:
+        """丢掉帧耗时的历史估计，从"期望预算"重新观察。
+
+        用于已知会抖一下的时刻：创建控制台、应用配置、修改帧率设置。
+        否则一次 200ms 的窗口构建会污染 EMA，让画质莫名其妙掉一档。
+        """
+        self._frame_ema = self._budget_ms
+        self._over_streak = 0
+        self._under_streak = 0
+        self._last_tick_time = time.perf_counter()
+
+    def console_visible(self) -> bool:
+        return self._settings_window is not None and self._settings_window.isVisible()
+
+    def console_in_front(self) -> bool:
+        """控制台是否可见、且没有被别的窗口压在下面。
+
+        "可见"不等于"看得见"：面板是普通窗口，点一下浏览器它就沉下去了。
+        热键和"洞"的取舍都取决于这个判断。
+        """
+        w = self._settings_window
+        if w is None or not w.isVisible() or w.isMinimized():
+            return False
+        try:
+            return not covered_rects(int(w.winId()), w.frameGeometry())
+        except Exception:
+            logger.debug("遮挡检测失败", exc_info=True)
+            return True
+
+    def toggle_console(self) -> bool:
+        """微信式开关：**真的看得见**才收起，否则一律召唤到前台。
+
+        注意两个坑：
+        1. "可见但最小化"要当成不可见 —— 否则按热键只会把它再藏一次，永远叫不出来；
+        2. "可见但被浏览器压着"同理 —— 用户按热键就是想把面板叫出来，不能反而藏掉。
+        """
+        if self.console_in_front():
+            self._settings_window.hide()
+            visible = False
+        else:
+            self.open_settings()
+            visible = True
+        logger.info("控制台: %s", "显示" if visible else "隐藏")
+        return visible
+
+    def console_stats(self) -> dict:
+        """控制台顶部那块状态区要的数据（每次刷新都是现算，不做增量维护）。"""
+        adults_f = adults_m = nymphs = eggs = foods = alive = 0
+        for e in self.entities:
+            if isinstance(e, Cockroach):
+                if not e.is_alive:
+                    continue
+                alive += 1
+                if e.stage == LifeStage.NYMPH:
+                    nymphs += 1
+                elif e.gender == "female":
+                    adults_f += 1
+                else:
+                    adults_m += 1
+            elif isinstance(e, Ootheca) and e.is_alive:
+                eggs += 1
+            elif isinstance(e, Food) and e.is_alive:
+                foods += 1
+        cap = min(int(self.config.get("simulation.max_roaches", 15)), self.BURST_HARD_LIMIT)
+        return {
+            "alive": alive,
+            "cap": cap,
+            "females": adults_f,
+            "males": adults_m,
+            "nymphs": nymphs,
+            "eggs": eggs,
+            "foods": foods,
+            "sim_visible": self.is_sim_visible,
+            "quality": self._quality,
+            "fps": self._fps_cap,
+            "hotkeys": self.hotkey_status(),
+        }
 
     def apply_runtime_settings(self) -> None:
         """即时热应用配置。"""
@@ -290,6 +635,7 @@ class RoachApp(QObject):
 
         render_style = str(self.config.get("render.style", "realistic"))
         shadow_intensity = float(self.config.get("render.shadow_intensity", 0.42))
+        Cockroach.show_teneral = bool(self.config.get("render.show_teneral", True))
 
         for e in self.entities:
             if isinstance(e, Cockroach):
@@ -323,13 +669,15 @@ class RoachApp(QObject):
         if not self.unlimited_quality:
             # 允许自适应器重新从最精细档试起，否则改了一次设置就永远停在低画质
             self._quality = 2
-            self._frame_ema = self._budget_ms
-            self._over_streak = self._under_streak = 0
+            self.reset_frame_governor()
 
         always_top = bool(self.config.get("window.always_on_top", True))
         from PySide6.QtCore import Qt
         self.overlay.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, always_top)
         self.overlay.show()
+
+        # 热键可能被改过：重新注册（失败的会写进 failures，控制台会展示原因）
+        self.register_hotkeys()
 
     def quit(self) -> None:
         logger.info("正在退出 roachHub...")

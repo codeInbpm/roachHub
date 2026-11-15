@@ -38,6 +38,9 @@ class LifeStage(Enum):
 class BaseEntity:
     """所有桌面生物与物体的基类。"""
 
+    # 能否被鼠标"认领"（抓取 / 惊吓）。蜕下来的空壳之类只是布景，设为 False。
+    interactive: bool = True
+
     def __init__(
         self,
         x: float = 0.0,

@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>蟑螂肢体动画预览</title>
+<style>
+  body { margin:0; padding:28px 34px; background:#f5f5f7; color:#1c1c1e;
+         font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  h1 { font-size:19px; margin:0 0 6px; }
+  .lead { color:#6b6b70; font-size:13px; margin:0 0 22px; }
+  .clip { background:#fff; border:1px solid #e6e6ea; border-radius:12px;
+           padding:16px 18px 20px; margin-bottom:18px; }
+  .clip h2 { font-size:14px; margin:0 0 4px; }
+  .clip p { color:#77777c; font-size:12px; margin:0 0 12px; }
+  .stage { display:flex; gap:18px; align-items:flex-end; }
+  .sprite {
+    width: var(--w); height: var(--h);
+    background-repeat:no-repeat;
+    background-size: calc(var(--w) * var(--n)) var(--h);
+    animation: play var(--d) steps(var(--n)) infinite;
+    image-rendering: auto;
+  }
+  @keyframes play { from { background-position: 0 0; }
+                     to { background-position: calc(var(--w) * var(--n) * -1) 0; } }
+</style></head><body>
+  <h1>蟑螂肢体动画 · 逐帧预览</h1>
+  <p class="lead">每帧间隔 1/60 秒，按真实步态相位抓取。触须与六足由程序化骨架驱动，
+     不是预烘焙循环图。</p>
+  
+    <section class="clip">
+      <h2>WALK · 95 px/s</h2>
+      <p>交替三足步态：左前/右中/左后为一组，与另一组反相抬落，任何时刻三条腿着地。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:16; --d:0.5333333333333333s; --w:210px; --h:210px;
+             background-image:url('frames/walk.png')"></div>
+      </div>
+    </section>
+    <section class="clip">
+      <h2>PANIC · 300 px/s</h2>
+      <p>步频与步幅同时放大，触须后伏，躯干随高频步态抖动。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:10; --d:0.3333333333333333s; --w:210px; --h:210px;
+             background-image:url('frames/panic.png')"></div>
+      </div>
+    </section>
+    <section class="clip">
+      <h2>GROOM · 静止梳理</h2>
+      <p>前足抬至头部反复搓动，被梳理一侧的触须下弯到前足之间。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:10; --d:0.5s; --w:210px; --h:210px;
+             background-image:url('frames/groom.png')"></div>
+      </div>
+    </section>
+    <section class="clip">
+      <h2>IDLE · 静止微调</h2>
+      <p>脚掌偶尔抬离调整落点（tarsal adjustment），触须持续扫探。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:8; --d:0.5333333333333333s; --w:210px; --h:210px;
+             background-image:url('frames/idle.png')"></div>
+      </div>
+    </section>
+    <section class="clip">
+      <h2>DRAGGED · 被捏住挣扎</h2>
+      <p>被拎在空中：六足原地乱蹬、触须各自狂扫、身体随甩动晃动；按住 6 秒后转为装死。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:10; --d:0.3333333333333333s; --w:210px; --h:210px;
+             background-image:url('frames/drag.png')"></div>
+      </div>
+    </section>
+    <section class="clip">
+      <h2>EAT · 抱食啃咬</h2>
+      <p>两只前足把食物收到口器前，腹板以约 1.3Hz 节律收缩，每 0.4 秒咬一口。</p>
+      <div class="stage">
+        <div class="sprite" style="--n:8; --d:0.26666666666666666s; --w:210px; --h:210px;
+             background-image:url('frames/eat.png')"></div>
+      </div>
+    </section>
+</body></html>

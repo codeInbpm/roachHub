@@ -94,6 +94,12 @@ PLAYDEAD_HOLD_TIME = 6.0
 # 松手后先瘫软这么久才逃
 PLAYDEAD_RELEASE_LIMP = 0.9
 
+# 刚蜕壳时的"嫩壳期"(teneral)：新角质层还没硬化、色素也没沉积，整只虫子是
+# 奶白半透明的。这里 2.2s 是纯白阶段，之后再用 1.4s 渐变回本来颜色 ——
+# 真实蟑螂也是几小时内慢慢变深的，只是桌面上按比例压缩成几秒。
+MOLT_WHITE_SECONDS = 2.2
+TENERAL_FADE_SECONDS = 1.4
+
 PALETTE_REALISTIC = {
     "leg": QColor(118, 66, 36),
     "joint": QColor(163, 108, 66),
@@ -117,6 +123,9 @@ class Cockroach(BaseEntity):
 
     # 渲染质量档位（0=极简 1=标准 2=精细），由主循环按同屏数量动态调整
     quality: int = 2
+
+    # 是否展示"刚蜕皮的奶白嫩壳"（设置里可关；关掉后蜕皮不再变白）
+    show_teneral: bool = True
 
     def __init__(
         self,
@@ -188,6 +197,11 @@ class Cockroach(BaseEntity):
         self._has_body_sprite: bool = False
         self._aim_l: float = -math.pi / 2.0 - 0.26
         self._aim_r: float = -math.pi / 2.0 + 0.26
+        # ---- 蜕皮（嫩壳）----
+        # 1 = 完全是奶白色，0 = 已恢复本来体色。molt_timer 走完之后由这个
+        # 计时器接着把白化"化"开，避免贴图硬切带来的跳变。
+        self.teneral_timer: float = 0.0
+
         self._anim_clock: float = random.uniform(0.0, 100.0)
         self._setup_rig()
 
@@ -226,7 +240,8 @@ class Cockroach(BaseEntity):
     # ------------------------------------------------------------------ 骨架
 
     def _current_body_sprite_name(self) -> str:
-        if self.molt_timer > 0:
+        # 刚蜕壳：奶白半透明的新角质层（真实蟑螂蜕皮后就是这样，几小时后才变深）
+        if self.molt_timer > 0 and Cockroach.show_teneral:
             return "cockroach_white_body"
         if self.stage == LifeStage.NYMPH:
             return "cockroach_nymph_body"
@@ -260,10 +275,25 @@ class Cockroach(BaseEntity):
                 self.stage = LifeStage.ADULT
 
             self.instar_age = 0.0
-            self.molt_timer = 2.2
+            self.molt_timer = MOLT_WHITE_SECONDS
+            # 白化计时比 molt_timer 长一个渐变段：贴图切回"正常色"的那一刻，
+            # 颜色是从奶白平滑化开的，而不是"啪"一下变棕。
+            self.teneral_timer = MOLT_WHITE_SECONDS + TENERAL_FADE_SECONDS
             self.state = EntityState.MOLTING
             self.target_speed = 0.0
             self._refresh_appearance_by_stage()
+
+    @property
+    def teneral_alpha(self) -> float:
+        """当前"奶白嫩壳"的浓度：1=全白，0=完全恢复本色。"""
+        if not Cockroach.show_teneral:
+            return 0.0
+        if self.molt_timer > 0:
+            return 1.0
+        if self.teneral_timer <= 0.0:
+            return 0.0
+        a = min(1.0, self.teneral_timer / TENERAL_FADE_SECONDS)
+        return a * a * (3.0 - 2.0 * a)   # smoothstep：两头更稳，中间化得快
 
     def start_grooming(self, duration: float = 2.0) -> None:
         self.state = EntityState.GROOMING
@@ -294,6 +324,9 @@ class Cockroach(BaseEntity):
 
     def update(self, dt: float) -> None:
         super().update(dt)
+
+        if self.teneral_timer > 0.0:
+            self.teneral_timer = max(0.0, self.teneral_timer - dt)
 
         if self.state == EntityState.MATING:
             self.mating_progress += dt
@@ -423,6 +456,19 @@ class Cockroach(BaseEntity):
         if self.drag_active:
             self.drag_target = Vector2D(pos.x, pos.y)
 
+    def trigger_freeze_and_panic(self, source_pos: Vector2D, duration: float = 2.4) -> None:
+        """软壳期覆盖：被碰一下只警觉，不僵直、不狂逃。
+
+        真实蟑螂蜕皮后几小时内是"软壳"，连爬动都费劲；这里如果照常惊慌狂逃，
+        就会出现"白色软壳虫以 430px/s 冲刺"的穿帮画面。
+        """
+        if self.molt_timer > 0.0:
+            self.threat_vector = source_pos - self.pos
+            self.alertness = min(1.0, self.alertness + 0.45)
+            self.target_speed = 0.0
+            return
+        super().trigger_freeze_and_panic(source_pos, duration)
+
     def end_drag(self) -> None:
         """松手：挣扎过的立刻逃，装死过的先瘫一会儿再逃。"""
         was_playing_dead = self._playdead
@@ -437,6 +483,12 @@ class Cockroach(BaseEntity):
             self._release_limp = PLAYDEAD_RELEASE_LIMP
             self.state = EntityState.DRAGGED
             return
+        if self.molt_timer > 0.0:
+            # 软壳：被放回桌面只能瘫着缓一缓，不能 430px/s 冲刺
+            self.state = EntityState.MOLTING
+            self.target_speed = 0.0
+            self.current_speed = 0.0
+            return
         self.panic_timer = max(self.panic_timer, 1.5)
         self.state = EntityState.PANIC
         self.target_angle = normalize_angle(self.angle + random.uniform(-0.5, 0.5))
@@ -446,6 +498,9 @@ class Cockroach(BaseEntity):
     def begin_prestartle(self, source: Vector2D, delay: float = 0.12) -> None:
         """先收触须，再僵直 —— 活物的顺序不是同时发生的。"""
         if self.prestartle_timer > 0.0 or self.drag_active:
+            return
+        # 刚蜕壳的个体是软壳，像刚拆线的人一样动不了：不预警、不僵直、不逃。
+        if self.molt_timer > 0.0:
             return
         self.prestartle_timer = max(0.05, delay)
         self._prestartle_source = Vector2D(source.x, source.y)
@@ -655,19 +710,30 @@ class Cockroach(BaseEntity):
             if self.state == EntityState.PANIC:
                 # 惊慌时躯干随高频步态轻微抖动
                 rect.translate(random.uniform(-0.7, 0.7), random.uniform(-0.7, 0.7))
-            if self.molt_timer > 0:
-                painter.setOpacity(0.88)
             # 进食时腹板节律收缩，咬下一口的那一瞬收缩最明显
             feed_scale = 1.0
             if self.state == EntityState.EAT:
                 feed_scale = 1.0 + 0.028 * math.sin(self._anim_clock * 8.0) - 0.045 * self._feed_pulse
+
+            # 嫩壳期：躯干整体略微透光（新壳还很软），这一段透明度不能漏到
+            # 后面的触须上，所以统一用 save/restore 包住。
+            body_opacity = 0.92 if self.molt_timer > 0 else 1.0
+            painter.save()
+            painter.setOpacity(body_opacity)
             if feed_scale != 1.0:
-                painter.save()
                 painter.scale(1.0, feed_scale)
-                painter.drawPixmap(rect.toRect(), sprite)
-                painter.restore()
-            else:
-                painter.drawPixmap(rect.toRect(), sprite)
+            painter.drawPixmap(rect.toRect(), sprite)
+
+            # 白化回落：molt_timer 归零后白贴图并不是"消失"，而是以递减的
+            # 不透明度叠在正常贴图上，颜色因此是化开的。只有蜕皮刚结束的一两秒
+            # 里才有这一层，最多十几只，开销可忽略。
+            alpha = self.teneral_alpha
+            if 0.02 < alpha < 1.0:
+                white = ResourceManager.get_sprite("cockroach_white_body")
+                if white is not None and not white.isNull():
+                    painter.setOpacity(alpha)
+                    painter.drawPixmap(rect.toRect(), white)
+            painter.restore()
         else:
             self._render_realistic_vector(painter)
 

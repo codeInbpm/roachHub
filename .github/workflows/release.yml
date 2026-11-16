@@ -96,24 +96,65 @@ jobs:
           path: ${{ steps.name.outputs.file }}
           if-no-files-found: error
 
+  # Intel Mac 单独跑一个：universal2 在 arm64 runner 上做不出来（解释器不是
+  # 双架构），只能用 x86_64 的 runner 原生构建。continue-on-error 是刻意的：
+  # 这个镜像万一不可用，也不能把 Windows / Apple Silicon 的发布一起拖死。
+  macos-intel:
+    name: macOS (x86_64)
+    runs-on: macos-26-intel
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 打包（dmg）
+        run: |
+          chmod +x packaging/build_macos.sh
+          bash packaging/build_macos.sh
+
+      - name: 重命名
+        id: name
+        run: |
+          BIN="dist/macos/roachHub.app/Contents/MacOS/roachHub"
+          ARCHS="$(lipo -archs "$BIN" 2>/dev/null | tr ' ' '_' || echo x86_64)"
+          OUT="dist/roachHub-macos-${ARCHS}.dmg"
+          cp "dist/macos/roachHub.dmg" "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg-intel
+          path: ${{ steps.name.outputs.file }}
+          if-no-files-found: error
+
   # ------------------------------------------------------------------ Release
   # 单独一个 job 汇总：两个构建 job 同时往同一个 Release 挂文件会打架。
   release:
     name: 发布 Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, macos]
+    if: always() && startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos, macos-intel]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true      # 三个包放进同一个目录，附件名互不覆盖
 
       - name: 列出附件
         run: find artifacts -type f -printf '%p  %k KB\n'
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*/*
+          files: artifacts/*
           generate_release_notes: true
           body: |
             ## 下载
@@ -121,7 +162,8 @@ jobs:
             | 平台 | 文件 | 说明 |
             | --- | --- | --- |
             | Windows 10/11 x64 | `roachHub-windows-x64.zip` | 解压后双击 `roachHub.exe`，整个文件夹一起拷走 |
-            | macOS | `roachHub-macos-*.dmg` | 打开后把 `roachHub` 拖进「应用程序」 |
+            | macOS Apple Silicon（M 系列） | `roachHub-macos-arm64.dmg` | 打开后把 `roachHub` 拖进「应用程序」 |
+            | macOS Intel | `roachHub-macos-x86_64.dmg` | 同上（只有拿 Intel 机器的构建成功时才会有） |
 
             **首次打开**：包没有做 Apple 公证 / Windows 代码签名，系统会拦一次。
 

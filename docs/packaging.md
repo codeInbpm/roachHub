@@ -129,10 +129,12 @@ python tools/swatter_test.py
 * **触发**：push `v*` tag（如 `v0.1.0`）→ 出两个包并挂到 GitHub Release；
   `workflow_dispatch` 手动跑只构建、不发布，用来验证"换台机器能不能打包"。
 * **Windows**：`windows-latest` 跑 `build_windows.ps1` → `roachHub-windows-x64.zip`。
-* **macOS**：`macos-latest` 跑 `build_macos.sh --arch universal2`；通用二进制要求解释器
-  和所有依赖都是双架构，PySide6 的 macOS wheel 是 universal2，但 setup-python 装的
-  解释器不一定 —— 失败会自动退回 runner 原生架构（arm64），文件名按 `lipo -archs`
-  的真实结果命名，不会出现"写着 universal2 其实只有 arm64"。
+* **macOS（Apple Silicon）**：`macos-latest` 跑 `build_macos.sh --arch universal2`；通用二进制
+  要求解释器和所有依赖都是双架构，PySide6 的 macOS wheel 是 universal2，但 setup-python
+  装的解释器不是（实测直接失败）—— 所以会自动退回 runner 原生架构（arm64），文件名按
+  `lipo -archs` 的真实结果命名，不会出现"写着 universal2 其实只有 arm64"。
+* **macOS（Intel）**：另开一个 `macos-26-intel` job 原生构建 x86_64。它带
+  `continue-on-error`，镜像不可用时只是少一个包，不影响其余两个发布。
 * **为什么 Windows 也要在 CI 里重打一遍**：Release 附件只能由 CI 的 `GITHUB_TOKEN`
   上传；本地打出来的包只能手动拖，无法自动化。
 

@@ -33,7 +33,7 @@ from .systems.swatter import Swatter
 from .systems.voice import GrabVoice
 from .systems.squash_voice import SquashVoice
 from .utils.hotkeys import GlobalHotkeyManager, supports_global_hotkeys
-from .utils.win_occlusion import covered_rects
+from .utils.occlusion import covered_rects
 from .utils.math_utils import Vector2D
 
 logger = logging.getLogger("roachHub.app")
@@ -891,6 +891,12 @@ class RoachApp(QObject):
         self.squash_voice.close()
         if self._settings_window:
             self._settings_window.close()
+        # mac 上覆盖层最后可能停在"不接管鼠标"的状态，正常退出要还回去；
+        # 万一这是最后的机会（进程立刻要没了），也别让它抛异常打断退出流程。
+        try:
+            self.overlay.release_click_through()
+        except Exception:
+            logger.debug("释放鼠标穿透状态失败", exc_info=True)
         self.overlay.close()
         self.tray.hide()
         self.qapp.quit()

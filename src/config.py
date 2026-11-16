@@ -1,9 +1,10 @@
 """配置加载、持久化与内存更新模块。"""
 
 from __future__ import annotations
-import os
-import sys
 import logging
+import os
+import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict
 
@@ -37,7 +38,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "show_teneral": True,
     },
     "window": {
-        # 点击穿透已统一为 WM_NCHITTEST 原生命中测试（Windows），
+        # 点击穿透由平台层自动选路，不再配置：Windows = WM_NCHITTEST 逐点询问，
+        # macOS = NSWindow.ignoresMouseEvents 逐帧开关，其余平台 = QRegion 遮罩 4Hz。
         # 旧的 click_through_mode="mask" 已废弃，不再读取。
         "always_on_top": True,
         "multi_screen": False,
@@ -214,13 +216,38 @@ def _format_value(v: Any) -> str:
     return f'"{str(v)}"'
 
 
+def default_config_path() -> Path:
+    """默认配置文件位置（含"首次运行从包里播种"）。
+
+    开发期 = 项目根的 config.toml；Windows 便携包 = exe 旁边的 config.toml；
+    macOS `.app` = `~/Library/Application Support/roachHub/config.toml`
+    （打包进 .app 里的那份只当模板，不改它，否则会破坏代码签名）。
+
+    打包时会把一份调好的 config.toml 一起发进去，所以首次运行要**把它复制到
+    可写位置**，而不是直接用 `DEFAULT_CONFIG` 重写一遍 —— 否则用户精心调过的
+    参数在 mac 上第一次启动就全没了。
+    """
+    from .utils.app_paths import bundle_dir, data_dir
+
+    target = data_dir() / "config.toml"
+    if not target.exists():
+        seed = bundle_dir() / "config.toml"
+        if seed != target and seed.exists():
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(seed, target)
+                logger.info("已从随包模板播种配置：%s", target)
+            except OSError as e:
+                logger.warning("播种配置失败（将使用内置默认值）: %s", e)
+    return target
+
+
 class Config:
     """应用程序配置容器。"""
 
     def __init__(self, config_path: str | Path | None = None) -> None:
         if config_path is None:
-            base_dir = Path(__file__).resolve().parent.parent
-            self.config_path = base_dir / "config.toml"
+            self.config_path = default_config_path()
         else:
             self.config_path = Path(config_path)
 

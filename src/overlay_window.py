@@ -25,6 +25,7 @@ from .systems.splatter import SplatterSystem
 from .systems.swatter import Swatter
 from .systems.trails import TrailCanvas
 from .utils.math_utils import Vector2D
+from .utils.mac_hit_test import CocoaClickThrough, supports_cocoa_hit_test
 from .utils.platform_utils import PlatformManager
 from .utils.win_hit_test import ClickThroughFilter, supports_native_hit_test
 
@@ -61,10 +62,20 @@ class OverlayWindow(QWidget):
         self.swatter: Optional[Swatter] = None
         self.splatter: Optional[SplatterSystem] = None
 
-        # 鼠标穿透策略：Windows 走 WM_NCHITTEST（不碰窗口形状），其它平台退回
-        # QRegion 遮罩（低频更新）。详见 utils/win_hit_test.py 的说明。
-        self._native_hit_test = supports_native_hit_test()
+        # 鼠标穿透策略（三档，判据是**同一份** `accepts_mouse_at`）：
+        #   win32 → WM_NCHITTEST 逐点问系统（Windows，最精确、零轮询）
+        #   cocoa → NSWindow.ignoresMouseEvents 逐帧开关（macOS，见 mac_hit_test.py）
+        #   mask  → QRegion 遮罩 4Hz 重建（其它平台兜底）
+        if supports_native_hit_test():
+            self._hit_mode = "win32"
+        elif supports_cocoa_hit_test():
+            self._hit_mode = "cocoa"
+        else:
+            self._hit_mode = "mask"
+        self._native_hit_test = self._hit_mode != "mask"
         self._hit_filter: Optional[ClickThroughFilter] = None
+        self._cocoa: Optional[CocoaClickThrough] = None
+        self._cocoa_accepting: Optional[bool] = None
 
         # 「洞」与「死区」—— 覆盖层必须把这两块地让出来，否则桌面会点不动：
         #   * hole:     控制台面板所在的矩形（画也不画、点也不接管），
@@ -113,7 +124,7 @@ class OverlayWindow(QWidget):
 
         self.resize_to_screen()
 
-        if self._native_hit_test:
+        if self._hit_mode == "win32":
             # 必须在窗口创建之后安装（要拿 hwnd）
             self._hit_filter = ClickThroughFilter(
                 self,
@@ -122,6 +133,9 @@ class OverlayWindow(QWidget):
             )
             QGuiApplication.instance().installNativeEventFilter(self._hit_filter)
             logger.info("鼠标穿透: WM_NCHITTEST（无窗口遮罩）")
+        elif self._hit_mode == "cocoa":
+            self._cocoa = CocoaClickThrough(self)
+            self._cocoa.attach()
         else:
             logger.info("鼠标穿透: QRegion 遮罩（低频更新）")
 
@@ -420,13 +434,39 @@ class OverlayWindow(QWidget):
         self.setMask(combined)
 
     def tick_mask(self, dt: float) -> None:
-        """遮罩兜底路径的低频心跳（Windows 下是空操作）。"""
-        if self._native_hit_test:
+        """鼠标穿透的心跳（每帧由 app 调用）。
+
+        * win32：空操作 —— 命中测试是系统回调驱动的，不需要我们轮询；
+        * cocoa：每帧判一次"光标下有没有该接管的东西"，然后开关窗口的
+          `ignoresMouseEvents`。为什么必须每帧：mac 上没有"逐点命中"的通知机制，
+          只能自己问 `QCursor.pos()`，而这个判断一旦慢了半拍，用户点下去的就是
+          桌面图标而不是虫子。
+        * mask：4Hz 重建遮罩（构建 QRegion 不便宜，低频才不闪）。
+        """
+        if self._hit_mode == "win32":
+            return
+        if self._hit_mode == "cocoa":
+            self._tick_cocoa()
             return
         self._mask_timer += dt
         if self._mask_timer >= 0.25:
             self._mask_timer = 0.0
             self._update_click_mask()
+
+    def _tick_cocoa(self) -> None:
+        """macOS：把"这个点该不该接管鼠标"翻译成窗口的 ignoresMouseEvents 开关。"""
+        if self._cocoa is None or not self._cocoa.ready:
+            return
+        try:
+            pos = QCursor.pos()
+            self._cocoa.set_accepts(self.accepts_mouse_at(pos.x(), pos.y()))
+        except Exception:
+            logger.debug("macOS 穿透轮询失败", exc_info=True)
+
+    def release_click_through(self) -> None:
+        """退出前恢复窗口的鼠标接收，别给系统留一个"点不动的洞"。"""
+        if self._cocoa is not None:
+            self._cocoa.release()
 
     def set_simulation_visible(self, visible: bool) -> None:
         """切换生物与覆盖层的可见性。"""
@@ -435,6 +475,9 @@ class OverlayWindow(QWidget):
             self.show()
             self._update_click_mask()
         else:
+            # mac：立刻把鼠标还给桌面，别等下一帧轮询
+            if self._cocoa is not None:
+                self._cocoa.set_accepts(False)
             if not self._native_hit_test:
                 self.setMask(QRegion())
             self.update()
@@ -542,6 +585,9 @@ class OverlayWindow(QWidget):
         if not self._native_hit_test:
             # 遮罩路径平时 4Hz 才更新一次；拿起/放下要立刻生效
             self._update_click_mask()
+        else:
+            # mac 的轮询路径同理：持拍/收拍要当帧生效，否则第一下就空了
+            self._tick_cocoa()
         self.update()
 
     @staticmethod

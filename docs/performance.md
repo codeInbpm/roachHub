@@ -31,7 +31,9 @@
 
 代价：单次命中测试 200 只时 **0.046ms**（先用平方距离粗筛，再对候选做旋转椭圆判定），且鼠标不动就不调用。
 
-> 非 Windows 平台保留 `QRegion` 遮罩兜底，但降到 **4Hz**（`tick_mask`），不再每帧。
+> **其它平台**：macOS 走 `NSWindow.ignoresMouseEvents`（每帧轮询 `QCursor.pos()` 后开关，
+> 判据仍是同一个 `accepts_mouse_at()`，开销只有一次 `QCursor.pos()`）；剩下不支持的平台
+> 保留 `QRegion` 遮罩兜底，但降到 **4Hz**（`tick_mask`），不再每帧。详见 `docs/packaging.md`。
 
 ---
 

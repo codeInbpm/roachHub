@@ -545,7 +545,9 @@ def test_hotkeys(app: RoachApp) -> None:
               mgr.failures.get("dup", "没有报错（异常）"))
     mgr.uninstall()
     check("卸载后清空注册", not mgr.is_registered("probe"), "is_registered=False")
-    check("平台能力查询与实现一致", supports_global_hotkeys() == sys.platform.startswith("win"),
+    check("平台能力查询与实现一致",
+          supports_global_hotkeys() == (sys.platform.startswith("win")
+                                        or sys.platform == "darwin"),
           f"{supports_global_hotkeys()}")
 
     # 3) 三个热键的默认值（只看配置，不在测试里抢真实系统热键）
@@ -779,6 +781,83 @@ def test_molting(app: RoachApp) -> None:
         Cockroach.show_teneral = True
 
 
+def test_platform_layer(app: RoachApp) -> None:
+    """跨平台适配层：mac 的键码/修饰键换算、路径解析、穿透模式选择。
+
+    这些都是"在 Windows 上跑不出来的分支"，只能把**纯数据部分**（映射表、换算、
+    路径推导）和**降级行为**（拿不到原生能力时不许崩）在这里钉死；真正的
+    Carbon / CGWindowList 调用只能在 mac 上实测。
+    """
+    print("\n[14] 跨平台适配层")
+
+    from src.utils import app_paths, objc_bridge
+    from src.utils.mac_hit_test import CocoaClickThrough, supports_cocoa_hit_test
+    from src.utils.mac_hotkeys import carbon_modifiers, keycode_of
+    from src.utils.occlusion import covered_rects as covered_any
+
+    # 1) mac 键码表：配置里四个默认热键必须都映射得上（否则 mac 上等于没热键）
+    missing = [k for k in ("R", "H", "B", "S", "F11", "Space")
+               if keycode_of(k) is None]
+    check("mac 键码表覆盖默认热键与常用键", not missing, f"缺失={missing}")
+
+    # 2) 修饰键换算：Windows 的 MOD_* 和 Carbon 的位是两套，错一位就是"设了没反应"
+    check("Ctrl+Alt → control|option",
+          carbon_modifiers(0x0002 | 0x0001, 0x8, 0x2, 0x1, 0x4) == 0x1800,
+          hex(carbon_modifiers(0x0002 | 0x0001, 0x8, 0x2, 0x1, 0x4)))
+    check("Win 键在 mac 上归到 Command",
+          carbon_modifiers(0x0008, 0x8, 0x2, 0x1, 0x4) == 0x0100,
+          hex(carbon_modifiers(0x0008, 0x8, 0x2, 0x1, 0x4)))
+
+    # 3) 穿透模式：三档里只能选中当前平台那一档
+    expected = ("win32" if sys.platform.startswith("win")
+                else "cocoa" if sys.platform == "darwin" else "mask")
+    check("穿透模式与平台匹配", app.overlay._hit_mode == expected,
+          f"{app.overlay._hit_mode}（期望 {expected}）")
+    check("原生命中与遮罩互斥",
+          app.overlay._native_hit_test == (expected != "mask"),
+          f"_native_hit_test={app.overlay._native_hit_test}")
+    app.overlay.release_click_through()      # 非 mac 上是空操作，但不能抛
+
+    # 4) 遮挡检测分发：不支持的平台/无效窗口一律返回空（= 认为面板露着），
+    #    绝不能抛异常 —— 这个函数挂在 4Hz 的轮询里
+    from PySide6.QtCore import QRect
+    check("遮挡检测：空面板返回空", covered_any(0, QRect()) == [], "[]")
+    check("遮挡检测：无效窗口不抛", covered_any(0, QRect(0, 0, 100, 100)) == [], "[]")
+
+    # 5) 路径：开发期必须落在项目根（打包后由 _MEIPASS / 用户目录接管）
+    check("开发期资源根 = 项目根", app_paths.bundle_dir() == ROOT,
+          str(app_paths.bundle_dir()))
+    check("开发期配置落在项目根", app.config.config_path == ROOT / "config.toml",
+          str(app.config.config_path))
+    check("开发期日志落在项目根 logs/", app_paths.log_dir() == ROOT / "logs",
+          str(app_paths.log_dir()))
+    check("非 mac 上 objc 桥不可用", objc_bridge.available() == (sys.platform == "darwin"),
+          str(objc_bridge.available()))
+
+    # 6) mac 后端缺失时必须**明确失败**，而不是掉进 Windows 分支去碰 `ctypes.windll`
+    #    （mac 上没有 windll 这个属性，掉下去就是 AttributeError 崩在 bind 里）
+    import src.utils.hotkeys as hk
+    real_platform = hk.sys.platform
+    try:
+        hk.sys.platform = "darwin"
+        probe = hk.GlobalHotkeyManager()          # 没 install → 没有 Carbon 后端
+        bound = probe.bind("x", "Ctrl+Alt+R", lambda: None)
+    finally:
+        hk.sys.platform = real_platform
+    check("mac 无后端时 bind 明确失败（不碰 windll）",
+          (not bound) and "Carbon" in probe.failures.get("x", ""),
+          probe.failures.get("x", "没有失败原因"))
+
+    # 7) Cocoa 穿透对象在非 mac 上必须"构造不炸、attach 失败但不影响主流程"
+    if not supports_cocoa_hit_test():
+        cocoa = CocoaClickThrough(app.overlay)
+        check("Cocoa 穿透在非 mac 上安全降级", cocoa.attach() is False, "attach=False")
+        cocoa.set_accepts(True)      # 无窗口时必须是空操作
+        cocoa.release()
+        check("Cocoa 穿透无窗口时状态不变", cocoa.accepting is None,
+              str(cocoa.accepting))
+
+
 def main() -> int:
     global qapp
     qapp = QApplication(sys.argv)
@@ -797,6 +876,7 @@ def main() -> int:
     test_console_and_burst(app)
     test_molting(app)
     test_icons_and_single_window(app)
+    test_platform_layer(app)
 
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n总计 {len(results)} 项，通过 {len(results) - len(failed)}，失败 {len(failed)}")

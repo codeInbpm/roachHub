@@ -36,16 +36,21 @@
 ## 2. 全局热键为什么必须自己做
 
 Qt 没有全局热键 API。`QShortcut` / `QAction.setShortcut` 只在**本应用有焦点**时收得到键，
-而桌面宠物的核心场景恰恰是"用户正在用别的软件，想顺手把面板叫出来"。所以只能走 Win32
-`RegisterHotKey`（`src/utils/hotkeys.py`）。
+而桌面宠物的核心场景恰恰是"用户正在用别的软件，想顺手把面板叫出来"。所以只能自己做：
+Windows 走 Win32 `RegisterHotKey`，macOS 走 Carbon `RegisterEventHotKey`
+（`src/utils/hotkeys.py` / `mac_hotkeys.py`，上层接口完全一致）。
 
-**两个坑（都踩过）**
+**两个坑（都踩过，Windows 侧）**
 
 1. `RegisterHotKey(None, ...)` 把热键注册到**当前线程**，`WM_HOTKEY` 投递到线程消息队列，
    Qt 会以 `windows_dispatcher_MSG` 交给 native event filter。只判断 `windows_generic_MSG`
    会永远收不到 —— 两种都收。
 2. 热键是**系统独占**的。被别的程序占了（或本进程重复注册同一组合），`RegisterHotKey` 返回 0，
    `GetLastError()` = 1409。必须把失败原因暴露给用户。
+
+**macOS 侧的两个坑**：修饰键是另一套位（cmd/shift/option/control），不能和 `MOD_*` 混用；
+键码是 `kVK_*`，和 `VK_*` 毫无关系，所以按**键名**（`key_label(vk)`）再查一次表，
+查不到的键要明确报"macOS 上没有这个键"，而不是静默失败。
 
 **默认键为什么不是 `Ctrl+Alt+W`**：这台机器上它已被占用（很可能是微信自己），
 实测一注册就 1409。默认改成同族的 `R`（console）/ `H`（hide）/ `B`（burst），

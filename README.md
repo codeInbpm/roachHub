@@ -209,6 +209,17 @@ python main.py               # 控制台会被自动隐藏（assets/icons 里的
 python main.py --keep-console   # 要盯着日志跑就用这个；--debug 额外输出 DEBUG
 ```
 
+### 📦 打包为独立程序
+
+目标机器不需要装 Python：
+
+```bash
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1   # → dist\windows\roachHub\
+./packaging/build_macos.sh                                            # → dist/macos/roachHub.dmg
+```
+
+平台能力差异、资源定位与 macOS 适配细节见 [`docs/packaging.md`](docs/packaging.md)。
+
 ### 繁殖测试建议：
 1. **测试简化交配**：
    - 启动后右键托盘投放食物碎屑，让雌虫吃饱（能量 ≥ 55）；它会在感应距离内找雄虫，靠近后短暂对接即受孕，冷却结束就在尾部产下一枚巨大的红褐色卵鞘；
@@ -267,3 +278,4 @@ python main.py --keep-console   # 要盯着日志跑就用这个；--debug 额�
 - 趣味性方案（已全部落地）：[`docs/fun-features.md`](docs/fun-features.md)
 - 控制台 / 热键 / 批量投放：[`docs/console.md`](docs/console.md)
 - 启动方式 / 图标 / 单窗口：[`docs/branding.md`](docs/branding.md)
+- 打包（Windows exe / macOS dmg）与跨平台适配：[`docs/packaging.md`](docs/packaging.md)

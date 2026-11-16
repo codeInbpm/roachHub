@@ -12,13 +12,13 @@ import logging
 import logging.handlers
 import sys
 import signal
-from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt
 
 from src.app import RoachApp
 from src.resources import ResourceManager
+from src.utils.app_paths import writable_log_dir
 from src.utils.console_window import hide_own_console
 from src.utils.single_instance import SingleInstanceGuard
 
@@ -28,8 +28,12 @@ APP_USER_MODEL_ID = "roachHub.DesktopSimulator"
 def setup_logging(debug: bool = False, log_file: bool = False) -> None:
     """初始化日志格式与等级。
 
-    两种情况下必须落盘：控制台被藏起来了、或者用 `pythonw.exe` 跑（`sys.stderr is None`，
-    往它写日志会变成一堆 "Lost sys.stderr" 噪音）—— 少了日志，出问题就无从查起。
+    两种情况下必须落盘：控制台被藏起来了、或者用 `pythonw.exe` / 打包的窗口程序
+    跑（`sys.stderr is None`，往它写日志会变成一堆 "Lost sys.stderr" 噪音）——
+    少了日志，出问题就无从查起。
+
+    日志目录**不看工作目录**：mac 上从 Finder 双击 `.app` 时 CWD 是 `/`（只读），
+    从快捷方式启动又可能是 exe 目录。具体落在哪里由 `app_paths` 统一决定。
     """
     level = logging.DEBUG if debug else logging.INFO
     format_str = "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s"
@@ -37,9 +41,8 @@ def setup_logging(debug: bool = False, log_file: bool = False) -> None:
     if sys.stderr is not None:
         handlers.append(logging.StreamHandler())
     if log_file or not handlers:
-        log_dir = Path("logs")
         try:
-            log_dir.mkdir(exist_ok=True)
+            log_dir = writable_log_dir()
             handlers.append(
                 logging.handlers.RotatingFileHandler(
                     log_dir / "roachHub.log",

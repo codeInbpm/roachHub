@@ -31,6 +31,13 @@ CODESIGN_IDENTITY="Developer ID Application: ..." NOTARY_PROFILE=xxx ./packaging
 
 构建描述在 `packaging/roachHub.spec`，两条脚本都只是它的驱动 + 校验 + 收尾。
 
+**一个真踩过的坑**：平铺布局的 `contents_directory="."` 必须写在 **`EXE()`** 上。
+PyInstaller 6.22 起 `COLLECT` 不再读自己这个参数，而是从 `EXE` 继承
+（`self.contents_directory = arg.contents_directory`）；写在 `COLLECT` 里会被
+`**kwargs` 静默吃掉，产物照旧落进 `_internal/` —— 而 `Config` / `ResourceManager`
+按 `_MEIPASS` 根查找，装完就是"能启动、但没贴图没声音、设置也不保存"。
+判断依据：产物目录里**不该**出现 `_internal`，`config.toml` 必须和 exe 同级。
+
 ## 3. 资源与可写路径
 
 `ResourceManager` / `Config` / `food_sprites` 历史上都是按
@@ -114,3 +121,19 @@ python tools/swatter_test.py
 
 真机 mac 上另外确认四件事：热键四个都生效、虫子身上能点中而桌面照常可点、
 控制台沉到浏览器后面时不再出现"空洞"、切 Space / 进全屏 App 后虫子还在。
+
+## 7. 发布（GitHub Actions）
+
+`.github/workflows/release.yml`：
+
+* **触发**：push `v*` tag（如 `v0.1.0`）→ 出两个包并挂到 GitHub Release；
+  `workflow_dispatch` 手动跑只构建、不发布，用来验证"换台机器能不能打包"。
+* **Windows**：`windows-latest` 跑 `build_windows.ps1` → `roachHub-windows-x64.zip`。
+* **macOS**：`macos-latest` 跑 `build_macos.sh --arch universal2`；通用二进制要求解释器
+  和所有依赖都是双架构，PySide6 的 macOS wheel 是 universal2，但 setup-python 装的
+  解释器不一定 —— 失败会自动退回 runner 原生架构（arm64），文件名按 `lipo -archs`
+  的真实结果命名，不会出现"写着 universal2 其实只有 arm64"。
+* **为什么 Windows 也要在 CI 里重打一遍**：Release 附件只能由 CI 的 `GITHUB_TOKEN`
+  上传；本地打出来的包只能手动拖，无法自动化。
+
+资产命名不要改：README 的下载表格和 Release 说明都按这两个名字写。

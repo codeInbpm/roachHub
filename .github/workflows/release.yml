@@ -1,0 +1,131 @@
+name: Build & Release
+
+# 打 tag（v0.1.0 这种）就出两平台安装包并挂到 GitHub Release；
+# 手动触发只跑构建、不建 Release，用来验证「换台机器能不能打包」。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  # ------------------------------------------------------------------ Windows
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 走项目自己的脚本，别在 CI 里另写一套 PyInstaller 参数 ——
+      # 否则「本地能打、CI 打出来不一样」这种问题永远查不清。
+      - name: 打包（便携目录）
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+
+      - name: 压缩成 zip
+        shell: pwsh
+        run: |
+          $src = "dist\windows\roachHub"
+          if (-not (Test-Path $src)) { throw "构建产物缺失: $src" }
+          # 连文件夹一起压：解压出来就是 roachHub\，不会把上百个 dll 撒在下载目录里
+          Compress-Archive -Path $src -DestinationPath "dist\roachHub-windows-x64.zip" -Force
+          Get-Item "dist\roachHub-windows-x64.zip" | ForEach-Object { "    {0:N1} MB" -f ($_.Length / 1MB) }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/roachHub-windows-x64.zip
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------- macOS
+  macos:
+    name: macOS (universal2)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # universal2 要求解释器和所有依赖都是双架构。PySide6 的 macOS wheel 是
+      # universal2，但 setup-python 装出来的解释器不一定 —— 失败就退回当前
+      # runner 的原生架构（macos-latest 现在是 arm64），至少 Apple Silicon 能用。
+      - name: 打包（dmg）
+        run: |
+          chmod +x packaging/build_macos.sh
+          if ! bash packaging/build_macos.sh --arch universal2; then
+            echo "::warning::universal2 构建失败，回退为 runner 原生架构"
+            bash packaging/build_macos.sh
+          fi
+
+      - name: 按实际架构命名
+        id: name
+        run: |
+          BIN="dist/macos/roachHub.app/Contents/MacOS/roachHub"
+          ARCHS="$(lipo -archs "$BIN" 2>/dev/null | tr ' ' '_' || echo unknown)"
+          OUT="dist/roachHub-macos-${ARCHS}.dmg"
+          cp "dist/macos/roachHub.dmg" "$OUT"
+          echo "file=$OUT" >> "$GITHUB_OUTPUT"
+          echo "    产物: $OUT（$ARCHS）"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: ${{ steps.name.outputs.file }}
+          if-no-files-found: error
+
+  # ------------------------------------------------------------------ Release
+  # 单独一个 job 汇总：两个构建 job 同时往同一个 Release 挂文件会打架。
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 列出附件
+        run: find artifacts -type f -printf '%p  %k KB\n'
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*/*
+          generate_release_notes: true
+          body: |
+            ## 下载
+
+            | 平台 | 文件 | 说明 |
+            | --- | --- | --- |
+            | Windows 10/11 x64 | `roachHub-windows-x64.zip` | 解压后双击 `roachHub.exe`，整个文件夹一起拷走 |
+            | macOS | `roachHub-macos-*.dmg` | 打开后把 `roachHub` 拖进「应用程序」 |
+
+            **首次打开**：包没有做 Apple 公证 / Windows 代码签名，系统会拦一次。
+
+            - macOS：右键 App →「打开」，或终端执行 `xattr -cr /Applications/roachHub.app`
+            - Windows：SmartScreen 提示 →「更多信息」→「仍要运行」
+
+            配置与日志位置：Windows 在 exe 旁边；macOS 在 `~/Library/Application Support/roachHub`。

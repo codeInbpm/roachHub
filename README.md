@@ -2,6 +2,16 @@
 
 一个运行在桌面上的透明覆盖层高拟真生物模拟器。具备真实的生物外观、微动作与完整的繁衍生态循环。
 
+## ⬇️ 下载即用（不用装 Python）
+
+| 平台 | 文件 | 说明 |
+| --- | --- | --- |
+| Windows 10/11 x64 | `roachHub-windows-x64.zip` | 解压后双击 `roachHub.exe`；整个文件夹要一起拷走 |
+| macOS | `roachHub-macos-*.dmg` | 打开后把 `roachHub` 拖进「应用程序」 |
+
+前往 **[Releases](https://github.com/codeInbpm/roachHub/releases/latest)** 下载。两个包都没有做 Apple 公证 / Windows 代码签名，
+首次打开系统会拦一次：mac 上右键 App →「打开」（或 `xattr -cr /Applications/roachHub.app`），Windows 上点「更多信息 →仍要运行」。
+
 ---
 
 ## 🌟 核心功能一览

@@ -91,22 +91,22 @@ _exe_kwargs = dict(
     entitlements_file=None,
 )
 
+# `contents_directory="."` = 老式平铺布局：exe 旁边直接是 assets/ 与 config.toml，
+# 而不是塞进 `_internal/`。**必须写在 EXE 上，不能写在 COLLECT 上** ——
+# PyInstaller 6.22 起 COLLECT 不再读自己的这个参数，而是 `arg.contents_directory`
+# 从 EXE 继承；写在 COLLECT 里会被 `**kwargs` 静默吃掉，产物照旧落 `_internal/`，
+# 而 `Config` / `ResourceManager` 按 `_MEIPASS` 根去找，运行时就找不到配置和贴图。
+# PyInstaller 5 不认这个关键字（`kwargs.get`），但它的默认布局本来就是平铺，正好一致。
+_exe_kwargs["contents_directory"] = "."
+
 
 def _collect(*args, **kwargs):
     """onedir 收尾。
 
-    `contents_directory` 是 PyInstaller 6.x 的参数（"." = 老式平铺布局）；
-    老版本没有这个关键字，退化成默认的 `_internal/` —— 那种情况下
-    config.toml 会落在 `_internal/config.toml`，脚本收尾时会把它打印出来。
-
-    用签名探测而不是 try/except：COLLECT 内部抛的 TypeError 不能被这里吞掉，
-    否则真正的构建错误会被伪装成"参数不支持"。
+    布局由 `_exe_kwargs["contents_directory"]` 决定（见上面的说明），这里只负责
+    把 EXE 和两份 TOC 交给 COLLECT，不再传布局参数 —— 不同 PyInstaller 版本对
+    "谁拥有这个参数"的处理不一致，传错地方比不传更糟（会静默退回 `_internal/`）。
     """
-    import inspect
-
-    if "contents_directory" in inspect.signature(COLLECT).parameters:
-        return COLLECT(*args, contents_directory=".", **kwargs)
-    print("[spec] 当前 PyInstaller 不支持 contents_directory，退回 _internal/ 布局")
     return COLLECT(*args, **kwargs)
 
 

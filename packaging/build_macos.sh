@@ -5,6 +5,7 @@
 #   CODESIGN_IDENTITY="Developer ID Application: XXX (TEAMID)" ./packaging/build_macos.sh
 #   NOTARY_PROFILE=roachhub-notary ./packaging/build_macos.sh   # 签 + 公证 + 装订
 #   ./packaging/build_macos.sh --skip-install  # 不联网装 PyInstaller
+#   ./packaging/build_macos.sh --arch universal2   # 同时支持 Intel / Apple Silicon
 #
 # **必须在 macOS 上跑**：PyInstaller 不能交叉编译，Windows 上生成的 exe 和应用
 # 包是两种完全不同的产物（mach-o vs PE）。
@@ -27,13 +28,22 @@ ICNS="$ROOT/assets/icons/roachhub.icns"
 ICNS_SRC="$ROOT/assets/icons/roachhub_512.png"
 
 SKIP_INSTALL=0
-for arg in "$@"; do
-    case "$arg" in
+ARCH="${ARCH:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
         --skip-install) SKIP_INSTALL=1 ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
-        *) echo "未知参数: $arg" >&2; exit 2 ;;
+        --arch) ARCH="${2:-}"; shift ;;
+        --arch=*) ARCH="${1#--arch=}" ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+        *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
+    shift
 done
+
+case "$ARCH" in
+    ""|arm64|x86_64|universal2) ;;
+    *) echo "未知架构: $ARCH（可选 arm64 / x86_64 / universal2）" >&2; exit 2 ;;
+esac
 
 step() { printf '\n\033[36m==> %s\033[0m\n' "$1"; }
 die()  { printf '\033[31m错误: %s\033[0m\n' "$1" >&2; exit 1; }
@@ -103,7 +113,17 @@ step "PyInstaller 构建 -> $DIST"
 
 rm -rf "$DIST" "$WORK/pyinstaller"
 mkdir -p "$DIST"
-"$PY" -m PyInstaller "$SPEC" --noconfirm --distpath "$DIST" --workpath "$WORK/pyinstaller" \
+
+# --target-arch 只在 macOS 上有效；universal2 要求所有依赖都是 universal2
+# （PySide6 的 macOS wheel 就是 universal2，纯 Python 的 tomli 无所谓）。
+ARCH_ARGS=()
+if [ -n "$ARCH" ]; then
+    ARCH_ARGS=(--target-arch "$ARCH")
+    echo "    目标架构: $ARCH"
+fi
+
+"$PY" -m PyInstaller "$SPEC" --noconfirm ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} \
+    --distpath "$DIST" --workpath "$WORK/pyinstaller" \
     || die "PyInstaller 构建失败"
 
 [ -d "$APP" ] || die "没生成 $APP"

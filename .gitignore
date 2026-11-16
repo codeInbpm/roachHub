@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 打包产物（dist 里的 zip/dmg 只作为发布附件，不进版本库）
+build/
+dist/
+
+# 运行期产物
+logs/
+*.log
+config.local.toml
+
+# 工具生成的预览图缓存（tools/out 里被当作成果图提交的除外）
+tools/out/__pycache__/
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

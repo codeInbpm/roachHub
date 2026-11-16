@@ -39,12 +39,18 @@ jobs:
 
       # 用产物本体跑自检：渲染一帧离屏图统计非透明像素（详见 main.py --self-check）。
       # 退出码非 0 = 覆盖层画不出任何东西，直接让这次构建红掉。
+      # 注意必须 Start-Process -Wait：roachHub.exe 是 GUI 子系统的程序，pwsh 的
+      # `&` 调用不等待（$LASTEXITCODE 取到的是空值），v0.1.1 第一次就是这么误报的。
       - name: 自检（渲染内容）
         shell: pwsh
         run: |
-          & "dist\windows\roachHub\roachHub.exe" --self-check
-          "self-check rc=$LASTEXITCODE"
-          if ($LASTEXITCODE -ne 0) { Get-Content "dist\windows\roachHub\logs\roachHub.log" -Tail 25 -ErrorAction SilentlyContinue; exit 1 }
+          $exe = "dist\windows\roachHub\roachHub.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-check" -PassThru -Wait
+          "self-check rc=$($p.ExitCode)"
+          if ($p.ExitCode -ne 0) {
+            Get-Content "dist\windows\roachHub\logs\roachHub.log" -Tail 25 -ErrorAction SilentlyContinue
+            exit 1
+          }
 
       - name: 压缩成 zip
         shell: pwsh

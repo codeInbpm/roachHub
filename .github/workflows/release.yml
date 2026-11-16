@@ -37,6 +37,15 @@ jobs:
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 
+      # 用产物本体跑自检：渲染一帧离屏图统计非透明像素（详见 main.py --self-check）。
+      # 退出码非 0 = 覆盖层画不出任何东西，直接让这次构建红掉。
+      - name: 自检（渲染内容）
+        shell: pwsh
+        run: |
+          & "dist\windows\roachHub\roachHub.exe" --self-check
+          "self-check rc=$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { Get-Content "dist\windows\roachHub\logs\roachHub.log" -Tail 25 -ErrorAction SilentlyContinue; exit 1 }
+
       - name: 压缩成 zip
         shell: pwsh
         run: |
@@ -80,6 +89,17 @@ jobs:
             bash packaging/build_macos.sh
           fi
 
+      # ★ mac 包的命门检查（v0.1.0 就是死在这）：渲染内容 + WindowServer 视角
+      # 反查覆盖层窗口。在 Windows 上永远复现不了这类问题，必须在这台真 mac 上验。
+      - name: 自检（覆盖层可见性 + 渲染内容）
+        run: |
+          BIN="dist/macos/roachHub.app/Contents/MacOS/roachHub"
+          "$BIN" --self-check
+          rc=$?
+          LOG="$HOME/Library/Application Support/roachHub/logs/roachHub.log"
+          [ -f "$LOG" ] && grep -E "self-check|窗口层级|鼠标穿透|覆盖窗口" "$LOG" | tail -12 || true
+          exit $rc
+
       - name: 按实际架构命名
         id: name
         run: |
@@ -120,6 +140,15 @@ jobs:
         run: |
           chmod +x packaging/build_macos.sh
           bash packaging/build_macos.sh
+
+      - name: 自检（覆盖层可见性 + 渲染内容）
+        run: |
+          BIN="dist/macos/roachHub.app/Contents/MacOS/roachHub"
+          "$BIN" --self-check
+          rc=$?
+          LOG="$HOME/Library/Application Support/roachHub/logs/roachHub.log"
+          [ -f "$LOG" ] && grep -E "self-check" "$LOG" | tail -8 || true
+          exit $rc
 
       - name: 重命名
         id: name

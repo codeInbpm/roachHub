@@ -118,6 +118,11 @@ def send_void_bool(obj: int, name: str, value: bool) -> None:
     _fn(None, (ctypes.c_bool,))(obj, sel(name), bool(value))
 
 
+def send_void_obj(obj: int, name: str, other: int) -> None:
+    """`setBackgroundColor:` 这类吃一个对象参数、无返回的选择器。"""
+    _fn(None, (ctypes.c_void_p,))(obj, sel(name), other)
+
+
 def send_void_long(obj: int, name: str, value: int) -> None:
     _fn(None, (ctypes.c_long,))(obj, sel(name), int(value))
 
@@ -155,6 +160,15 @@ def send_int(obj: int, name: str) -> int:
     return int(_fn(ctypes.c_int, ())(obj, sel(name)))
 
 
+def send_bool(obj: int, name: str) -> bool:
+    """返回 `BOOL` 的选择器（如 `isVisible`）。
+
+    BOOL 在 arm64 上是 `unsigned char`，用 c_int 去接会连高位一起读，
+    偶然也能对——但那是碰运气，别学。
+    """
+    return bool(_fn(ctypes.c_bool, ())(obj, sel(name)))
+
+
 def send_double(obj: int, name: str) -> float:
     """返回 `double` 的选择器（如 NSNumber.doubleValue）。
 
@@ -188,6 +202,11 @@ def window_level(level_key: int = WINDOW_LEVEL_SCREENSAVER_KEY) -> int:
 def nsstring(text: str) -> int:
     """Python 字符串 → NSString（autoreleased）。"""
     return send_obj_cstr(cls("NSString"), "stringWithUTF8String:", text)
+
+
+def clear_color() -> int:
+    """`[NSColor clearColor]`（autoreleased）——透明覆盖层窗口的背景色。"""
+    return send_obj(cls("NSColor"), "clearColor")
 
 
 def window_of(view_or_window: int) -> int:

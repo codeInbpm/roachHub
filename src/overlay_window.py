@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import logging
+import sys
 import time
 from typing import List, Callable, Optional
 
@@ -110,10 +111,20 @@ class OverlayWindow(QWidget):
 
     def _init_window(self) -> None:
         """初始化窗口属性、无边框与背景透明度。"""
+        # 窗口类型按平台分道（QTBUG-97004）：
+        #   * Windows 用 SubWindow —— 不进任务栏、不抢焦点，一切正常；
+        #   * macOS 必须用 Tool —— Qt 6 的 cocoa 插件里 WA_TranslucentBackground
+        #     只在 Tool 类型的窗口上落地，SubWindow 上是哑的：窗口"存在"但
+        #     整层不显示 —— 控制台/托盘/音效全都活着，桌面却一只虫都看不见，
+        #     就是 v0.1.0 在 mac 上的现象。
+        if sys.platform == "darwin":
+            type_flag = Qt.WindowType.Tool
+        else:
+            type_flag = Qt.WindowType.SubWindow
         flags = (
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.SubWindow
+            | type_flag
             | Qt.WindowType.NoDropShadowWindowHint
         )
         self.setWindowFlags(flags)
@@ -205,6 +216,11 @@ class OverlayWindow(QWidget):
             PlatformManager.setup_window_styles(hwnd)
         except Exception as e:
             logger.warning("配置底层平台样式异常: %s", e)
+        # cocoa 穿透在 __init__ 里可能拿不到 NSWindow（视图还没挂进窗口），
+        # 每次显示时补一次；attach 本身幂等
+        if self._hit_mode == "cocoa" and self._cocoa is not None \
+                and not self._cocoa.ready:
+            self._cocoa.attach()
 
     def set_entities(self, entities: List[BaseEntity]) -> None:
         """更新当前帧待渲染的全部生态实体（蟑螂、卵鞘、食物）。"""

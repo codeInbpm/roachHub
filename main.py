@@ -5,6 +5,8 @@
     python main.py --debug    保留控制台并输出 DEBUG 日志
     python main.py --keep-console  保留控制台（日常看日志用）
     python main.py --allow-multiple 允许开多个实例（默认单实例）
+    python main.py --self-check    自检模式（CI 用）：跑 2 秒后验证
+                                  "覆盖层真的画出了虫子"，非零退出码 = 失败
 """
 
 from __future__ import annotations
@@ -79,6 +81,7 @@ def main() -> int:
 
     debug = "--debug" in sys.argv
     keep_console = debug or "--keep-console" in sys.argv
+    self_check = "--self-check" in sys.argv
 
     # 先藏控制台再建窗口：免得任务栏上先闪一下那个黑色的 python 图标。
     # 只有"这个控制台只挂着我们一个进程"时才会真的藏（从 cmd 启动时不能藏人家的终端）。
@@ -114,7 +117,23 @@ def main() -> int:
     roach_app = RoachApp(app)
     if not allow_multi:
         guard.activated.connect(roach_app.summon_console)
+    if self_check:
+        roach_app.self_check_mode = True
     roach_app.start()
+
+    if self_check:
+        # --self-check：跑起来 2 秒（够事件循环/音频/贴图各就各位）后做两级
+        # 检查（渲染内容 + 原生窗口），用退出码把结果带回给 CI。
+        from PySide6.QtCore import QTimer
+        check_result = [0]
+
+        def _run_check() -> None:
+            check_result[0] = roach_app.run_self_check()
+            roach_app.quit()
+
+        QTimer.singleShot(2000, _run_check)
+        app.exec()
+        return check_result[0]
 
     return app.exec()
 

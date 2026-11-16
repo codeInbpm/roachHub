@@ -112,8 +112,25 @@ control 0x1000），和 Windows `MOD_*` 不能混用；键码表也是 `kVK_*`�
 
 ## 6. 打包后的自检
 
+### 6.1 `--self-check`（CI 用，产物级）
+
 ```bash
-# 两边都能跑（离屏）
+./roachHub --self-check                     # Windows: dist\windows\roachHub\roachHub.exe
+open roachHub.app --args --self-check       # macOS
+```
+
+跑 2 秒后做两级检查，退出码非 0 即失败（CI 里构建完直接跑产物本体）：
+
+1. **渲染内容**：`overlay.grab()` 渲染一帧离屏图，统计非透明像素 ——
+   一张全透明的图说明虫子/食物一个都没画出来。自检模式不弹控制台、
+   取图前清掉"洞"（无头环境里洞会算出满屏，把整个渲染裁剪掉）。
+2. **原生窗口**（仅 macOS）：`CGWindowList` 从 WindowServer 视角反查自己的
+   覆盖层窗口 —— layer 必须是 1000、bounds 必须覆盖屏幕。Qt 侧"show() 没报错"
+   根本证明不了这层窗口真的存在（v0.1.0 就是这么漏出去的）。
+
+### 6.2 回归（源码级，两边都能离屏跑）
+
+```bash
 python tools/interaction_test.py      # 含 [14] 跨平台适配层
 python tools/smoke_test.py
 python tools/swatter_test.py
@@ -122,17 +139,28 @@ python tools/swatter_test.py
 真机 mac 上另外确认四件事：热键四个都生效、虫子身上能点中而桌面照常可点、
 控制台沉到浏览器后面时不再出现"空洞"、切 Space / 进全屏 App 后虫子还在。
 
+### 6.3 v0.1.0 的教训（mac"没虫子"根因）
+
+**QTBUG-97004**：Qt 6 的 cocoa 插件里 `WA_TranslucentBackground` 只在
+`Qt::Tool` 类型的窗口上生效。覆盖层当时用的是 `Qt::SubWindow`（Windows 上
+没毛病），mac 上透明属性整个是哑的 —— 进程活着、控制台能点、音效在响，
+覆盖层却没挂上合成器。修复分两层：窗口类型按平台分道（darwin 用 `Tool`）+
+`_setup_macos_styles` 亲手做"透明三件套"（`setOpaque:NO` + clearColor 背景 +
+`setHasShadow:NO`），Qt 那层设没设成都不再要紧。
+
 ## 7. 发布（GitHub Actions）
 
 `.github/workflows/release.yml`：
 
 * **触发**：push `v*` tag（如 `v0.1.0`）→ 出两个包并挂到 GitHub Release；
   `workflow_dispatch` 手动跑只构建、不发布，用来验证"换台机器能不能打包"。
-* **Windows**：`windows-latest` 跑 `build_windows.ps1` → `roachHub-windows-x64.zip`。
+* **Windows**：`windows-latest` 跑 `build_windows.ps1` → 产物跑 `--self-check`
+  → `roachHub-windows-x64.zip`。
 * **macOS（Apple Silicon）**：`macos-latest` 跑 `build_macos.sh --arch universal2`；通用二进制
   要求解释器和所有依赖都是双架构，PySide6 的 macOS wheel 是 universal2，但 setup-python
   装的解释器不是（实测直接失败）—— 所以会自动退回 runner 原生架构（arm64），文件名按
   `lipo -archs` 的真实结果命名，不会出现"写着 universal2 其实只有 arm64"。
+  **打包后产物本体跑 `--self-check`**（渲染内容 + WindowServer 反查覆盖层窗口）。
 * **macOS（Intel）**：另开一个 `macos-26-intel` job 原生构建 x86_64。它带
   `continue-on-error`，镜像不可用时只是少一个包，不影响其余两个发布。
 * **为什么 Windows 也要在 CI 里重打一遍**：Release 附件只能由 CI 的 `GITHUB_TOKEN`

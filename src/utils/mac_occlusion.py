@@ -70,6 +70,59 @@ def supports_cocoa_occlusion() -> bool:
     return sys.platform == "darwin"
 
 
+def own_window_info(view_ptr: int = 0) -> dict | None:
+    """`--self-check` 用：从 WindowServer 视角反查"我们的覆盖层窗口在不在屏上"。
+
+    和 `covered_rects` 的区别：那个是"别人挡没挡我"，这个是"我自己存不存在"。
+    覆盖层是全透明的第 1000 层窗口，Qt 侧一切正常时它也应该出现在
+    `CGWindowListCopyWindowInfo` 里 —— 要是连列表里都没有（或 bounds 是零），
+    说明窗口根本没被合成器挂上去，Qt 侧查不出来这种死法。
+
+    `view_ptr` 传 0 时按"本进程所有窗口"匹配（找 layer 最高、面积最大的那个）。
+    """
+    if not supports_cocoa_occlusion():
+        return None
+    array = 0
+    try:
+        cg = objc_bridge._coregraphics()
+        # 0x40 = kCGWindowListOptionIncludingWindow 无所谓；用 OnScreenOnly 会把
+        # "创建了但没显示"的窗口滤掉 —— 那正是我们想抓出来的状态，所以列全部。
+        array = int(cg.CGWindowListCopyWindowInfo(0x10, 0) or 0)   # ExcludeDesktopElements
+        if not array:
+            return None
+        own_pid = os.getpid()
+        keys = _keys()
+        count = objc_bridge.send_ulong(array, "count")
+        best: dict | None = None
+        best_score = (-1, -1.0)
+        for index in range(count):
+            info = objc_bridge.send_obj_idx(array, "objectAtIndex:", index)
+            if not info:
+                continue
+            if _int_of(info, keys["kCGWindowOwnerPID"]) != own_pid:
+                continue
+            layer = _int_of(info, keys["kCGWindowLayer"])
+            bounds = objc_bridge.rect_from_dict(
+                objc_bridge.send_obj_key(info, "objectForKey:", keys["kCGWindowBounds"])
+            )
+            area = bounds[2] * bounds[3] if bounds else 0.0
+            # 覆盖层特征：本进程里 layer 最大、面积最大的窗口
+            if (layer, area) > best_score:
+                best_score = (layer, area)
+                best = {
+                    "layer": layer,
+                    "alpha": _double_of(info, keys["kCGWindowAlpha"]),
+                    "bounds": bounds,
+                }
+        return best
+    except Exception:
+        logger.warning("own_window_info 查询失败", exc_info=True)
+        return None
+    finally:
+        if array:
+            objc_bridge.cf_release(array)
+
+
 def covered_rects(view_ptr: int, panel: QRect) -> List[QRect]:
     """返回压在面板上方、且与面板相交的窗口矩形（屏幕坐标）。
 

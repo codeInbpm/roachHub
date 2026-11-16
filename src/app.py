@@ -177,6 +177,9 @@ class RoachApp(QObject):
         self._fps_cap = self.target_fps
         self._quality_locked = False
         self.min_fps = int(self.config.get("performance.min_fps", 30))
+        # `--self-check`（main.py 传入）：只做"画不画得出虫子"的产物自检，
+        # 跳过一切与此无关的交互（弹控制台等）
+        self.self_check_mode = False
         self._tray_update_at = 0.0
         self._tick_ms = 0.0
         self._tick_t0 = 0.0
@@ -217,11 +220,101 @@ class RoachApp(QObject):
 
         self._console_hole_timer.start()
 
-        # 默认直接弹出控制台（不用先去右下角翻托盘菜单）
-        if bool(self.config.get("app.open_console_on_start", True)):
+        # 默认直接弹出控制台（不用先去右下角翻托盘菜单）。
+        # 自检模式下不弹：控制台的"洞"逻辑在无头环境里会算出满屏洞，
+        # 把整个渲染裁剪掉，干扰的是"虫子有没有画出来"这个唯一的命题。
+        if not self.self_check_mode and bool(
+            self.config.get("app.open_console_on_start", True)
+        ):
             self.open_settings()
 
         logger.info("模拟主循环已启动，当前目标帧率: %d FPS", self.target_fps)
+
+    # ------------------------------------------------------------ 产物自检
+
+    def run_self_check(self) -> int:
+        """`--self-check`：验证打包产物"真的画得出虫子"，给 CI 用。
+
+        桌面玩具的坑在于：**启动成功 ≠ 显示成功**。v0.1.0 的 mac 包就是——
+        进程活着、控制台能点、音效在响，覆盖层窗口却因为 QTBUG-97004
+        （`WA_TranslucentBackground` 在 SubWindow 类型上不生效）整层没挂上
+        合成器。这类死法在 Windows 上一辈子复现不了，所以打包流水线里
+        必须在真机 mac 上跑一遍这个检查。
+
+        两级检查：
+
+        1. **渲染内容** —— `overlay.grab()` 渲染一帧离屏图，统计非透明像素。
+           覆盖层正常时至少有 3 只蟑螂 + 1 块食物的墨迹；一张全透明的图
+           说明贴图/绘制管线整个是哑的。
+        2. **原生窗口**（仅 macOS）—— 用 `CGWindowList` 从 WindowServer 视角
+           反查自己的覆盖层窗口：layer 是否为 1000、bounds 是否覆盖屏幕。
+           Qt 侧"show() 没报错"根本证明不了这层窗口真的存在。
+        """
+        rc = 0
+
+        # 与控制台解耦：关面板、清"洞"，保证量的是"虫子有没有画出来"，
+        # 不是"蟑螂是不是恰好都在洞里/洞把全屏裁掉了"
+        if self._settings_window is not None:
+            try:
+                self._settings_window.close()
+            except Exception:
+                pass
+        self.overlay.set_hole_region(None)
+
+        # 先看清状态再判断：这三个值任何一个不对，"为什么是空的"就不用猜了
+        hole = self.overlay.hole_region()
+        logger.info(
+            "[self-check] 状态: 实体=%d 可见=%s 洞=%s",
+            len(self.overlay.entities),
+            self.overlay._is_visible_state,
+            hole.boundingRect().getRect() if hole is not None else None,
+        )
+
+        # 1) 渲染内容
+        try:
+            image = self.overlay.grab().toImage()
+            w, h = image.width(), image.height()
+            step = max(1, min(w, h) // 240)
+            ink = 0
+            samples = 0
+            for y in range(0, h, step):
+                for x in range(0, w, step):
+                    samples += 1
+                    if image.pixelColor(x, y).alpha() > 8:
+                        ink += 1
+            logger.info("[self-check] 渲染内容: %dx%d, 采样 %d 点, 非透明 %d",
+                        w, h, samples, ink)
+            if ink < 4:
+                logger.error("[self-check] 渲染内容为空 —— 虫子/食物一个都没画出来")
+                rc = 1
+        except Exception:
+            logger.exception("[self-check] 渲染检查崩溃")
+            rc = 1
+
+        # 2) 原生窗口（macOS）
+        if sys.platform == "darwin":
+            try:
+                from .utils.mac_occlusion import own_window_info
+                info = own_window_info()
+                if info is None:
+                    logger.error("[self-check] CGWindowList 里找不到本进程任何窗口")
+                    rc = 1
+                else:
+                    layer, bounds = info["layer"], info["bounds"]
+                    logger.info("[self-check] 覆盖层窗口: layer=%s alpha=%.2f bounds=%s",
+                                layer, info["alpha"], bounds)
+                    if layer != 1000:
+                        logger.error("[self-check] 覆盖层不在第 1000 层（实际 %s）", layer)
+                        rc = 1
+                    if not bounds or bounds[2] < 200 or bounds[3] < 200:
+                        logger.error("[self-check] 覆盖层窗口尺寸异常: %s", bounds)
+                        rc = 1
+            except Exception:
+                logger.exception("[self-check] 原生窗口检查崩溃")
+                rc = 1
+
+        logger.info("[self-check] 完成，退出码 %d", rc)
+        return rc
 
     # ---------------------------------------------------------------- 热键
 

@@ -97,7 +97,14 @@ class PlatformManager:
         3. **失活不隐藏** —— `.app` 是 LSUIElement（无 Dock 图标），这类程序的窗口
            默认会在应用失去焦点时 `hidesOnDeactivate`，用户点一下别处虫子就没了。
 
-        另外顺手 `orderFrontRegardless`：不激活应用也能把窗口提到最前。
+        另外**必须亲手做一遍"透明窗口三件套"**（`setOpaque:NO` + clearColor 背景 +
+        `setHasShadow:NO`）：`WA_TranslucentBackground` 在 cocoa 插件里对窗口类型的
+        依赖很怪（QTBUG-97004），光靠 Qt 这层不可靠。v0.1.0 在 mac 上"窗口整个
+        不显示"就是这么来的 —— 窗口存在、事件在跑、音效在响，就是合成器里没有
+        这一层。这里直接把 NSWindow 钉成"非不透明 + 全透明背景"，Qt 那边设没设
+        成都不再要紧。
+
+        最后顺手 `orderFrontRegardless`：不激活应用也能把窗口提到最前。
         """
         from . import objc_bridge as ob
 
@@ -109,6 +116,9 @@ class PlatformManager:
                 logger.debug("macOS: 拿不到 NSWindow，跳过窗口层级设置")
                 return False
 
+            ob.send_void_bool(window, "setOpaque:", False)
+            ob.send_void_obj(window, "setBackgroundColor:", ob.clear_color())
+            ob.send_void_bool(window, "setHasShadow:", False)
             ob.send_void_long(window, "setLevel:", ob.window_level())
             behavior = (
                 ob.NSWindowCollectionBehaviorCanJoinAllSpaces
@@ -120,7 +130,9 @@ class PlatformManager:
             ob.send_void_bool(window, "setHidesOnDeactivate:", False)
             ob.send_void_bool(window, "setCanHide:", False)
             ob.send_void(window, "orderFrontRegardless")
-            logger.info("macOS 窗口层级已提升（level=%s, 跨 Space）", ob.window_level())
+            logger.info("macOS 窗口层级已提升（level=%s, 跨 Space, isVisible=%s）",
+                        ob.window_level(),
+                        ob.send_bool(window, "isVisible"))
             return True
         except Exception as e:
             logger.warning("设置 macOS 窗口属性失败: %s", e)

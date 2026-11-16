@@ -50,6 +50,21 @@ class MovementSystem:
             if entity.state == EntityState.DRAGGED:
                 continue
 
+            # 交尾中：只保留"尾对尾"的朝向对齐。趋边性会把它转向贴墙、同类排斥
+            # 会把两头虫推开、残余速度还会让它滑走 —— 都会把好不容易对上的位形拆掉。
+            if entity.state == EntityState.MATING:
+                diff = angle_diff(entity.angle, entity.target_angle)
+                max_rotation = entity.turn_rate * dt
+                if abs(diff) <= max_rotation:
+                    entity.angle = entity.target_angle
+                else:
+                    entity.angle = normalize_angle(
+                        entity.angle + math.copysign(max_rotation, diff)
+                    )
+                entity.current_speed = 0.0
+                entity.velocity = Vector2D(0.0, 0.0)
+                continue
+
             # 1. 计算趋边性（Thigmotaxis）引导角
             if entity.state != EntityState.PANIC and self.thigmotaxis_weight > 0.05:
                 self._apply_thigmotaxis(entity, dt)

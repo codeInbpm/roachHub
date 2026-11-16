@@ -29,6 +29,8 @@ from PySide6.QtWidgets import (
 )
 
 from .config import Config, DEFAULT_CONFIG
+from .systems.squash_voice import DEFAULT_SET, SOUND_SET_LABELS, SOUND_SETS
+from .entities.food_kinds import BY_KEY, DEFAULT_KEY, RANDOM_KEY, menu_items
 from .resources import ResourceManager
 from .utils.hotkeys import normalize_hotkey
 
@@ -67,8 +69,8 @@ QTabWidget::pane {
 QTabBar::tab {
     background: #1a1a20;
     color: #9292a4;
-    padding: 8px 18px;
-    margin-right: 4px;
+    padding: 8px 13px;
+    margin-right: 3px;
     border-top-left-radius: 6px;
     border-top-right-radius: 6px;
     border: 1px solid transparent;
@@ -214,29 +216,33 @@ class SettingsWindow(QWidget):
         on_applied: Optional[Callable[[], None]] = None,
         on_clear_trails: Optional[Callable[[], None]] = None,
         on_preview_voice: Optional[Callable[[], None]] = None,
+        on_preview_squash_voice: Optional[Callable[[], None]] = None,
         on_nest_burst: Optional[Callable[[], int]] = None,
         on_spawn_roaches: Optional[Callable[..., list]] = None,
         on_spawn_foods: Optional[Callable[..., list]] = None,
         on_clear_all: Optional[Callable[[], None]] = None,
         on_query_stats: Optional[Callable[[], dict]] = None,
         on_toggle_sim_visible: Optional[Callable[[], bool]] = None,
+        on_toggle_swatter: Optional[Callable[[], bool]] = None,
     ) -> None:
         super().__init__()
         self.config = config
         self.on_clear_trails = on_clear_trails
         self.on_preview_voice = on_preview_voice
+        self.on_preview_squash_voice = on_preview_squash_voice
         self.on_nest_burst = on_nest_burst
         self.on_spawn_roaches = on_spawn_roaches
         self.on_spawn_foods = on_spawn_foods
         self.on_clear_all = on_clear_all
         self.on_query_stats = on_query_stats
         self.on_toggle_sim_visible = on_toggle_sim_visible
+        self.on_toggle_swatter = on_toggle_swatter
         if on_applied:
             self.config_applied.connect(on_applied)
 
         self.setWindowTitle("roachHub - 高拟真控制台")
         self.setWindowIcon(ResourceManager.get_app_icon())
-        self.resize(880, 830)
+        self.resize(900, 830)
         self.setStyleSheet(SETTINGS_STYLE)
 
         self._init_ui()
@@ -277,7 +283,10 @@ class SettingsWindow(QWidget):
         # 5. 互动与氛围 Tab（拖拽 / 痕迹 / 音效）
         self.tabs.addTab(self._build_atmosphere_tab(), "🖱️ 互动氛围")
 
-        # 6. 常规与热键 Tab
+        # 6. 蟑螂拍 Tab（持拍模式 / 爆浆 / 判定手感）
+        self.tabs.addTab(self._build_swatter_tab(), "🔨 苍蝇拍")
+
+        # 7. 常规与热键 Tab
         self.tabs.addTab(self._build_general_tab(), "⌨️ 快捷键")
 
         # 底部按钮
@@ -448,7 +457,9 @@ class SettingsWindow(QWidget):
 
         # ---- 批量投放食物 ----
         food_group = QGroupBox("批量投放食物")
-        food_box = QHBoxLayout(food_group)
+        food_outer = QVBoxLayout(food_group)
+        food_outer.setSpacing(6)
+        food_box = QHBoxLayout()
         food_box.setSpacing(8)
         food_box.addWidget(QLabel("数量"))
         self.spin_food_count = QSpinBox()
@@ -456,10 +467,35 @@ class SettingsWindow(QWidget):
         self.spin_food_count.setValue(5)
         self.spin_food_count.setSuffix(" 块")
         food_box.addWidget(self.spin_food_count)
-        self.btn_spawn_foods = QPushButton("🧀 投放碎屑")
+
+        food_box.addWidget(QLabel("种类"))
+        self.combo_food_kind = QComboBox()
+        self.combo_food_kind.setMaxVisibleItems(14)
+        self.combo_food_kind.setMinimumWidth(210)
+        self.combo_food_kind.setMaximumWidth(320)
+        for label, key in menu_items():
+            self.combo_food_kind.addItem(label, key)
+        # 分组标题（key 为 None）置灰不可选，否则用户能选中一行"──── 中能 ────"
+        model = self.combo_food_kind.model()
+        for i in range(self.combo_food_kind.count()):
+            if self.combo_food_kind.itemData(i) is None:
+                item = model.item(i) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(False)
+        food_box.addWidget(self.combo_food_kind)
+
+        self.btn_spawn_foods = QPushButton("🪳 投放食物")
         self.btn_spawn_foods.clicked.connect(self._on_spawn_foods_clicked)
         food_box.addWidget(self.btn_spawn_foods)
         food_box.addStretch()
+
+        self.label_food_hint = QLabel("")
+        self.label_food_hint.setProperty("role", "hint")
+        self.label_food_hint.setWordWrap(True)
+        food_outer.addLayout(food_box)
+        food_outer.addWidget(self.label_food_hint)
+        self.combo_food_kind.currentIndexChanged.connect(self._update_food_hint)
+        self._update_food_hint()
         layout.addWidget(food_group)
 
         # ---- 桌面可见性 ----
@@ -525,6 +561,7 @@ class SettingsWindow(QWidget):
         self.label_stat_detail.setText(
             f"成虫 ♀{s.get('females', 0)} ♂{s.get('males', 0)} · "
             f"若虫 {s.get('nymphs', 0)} · 卵鞘 {s.get('eggs', 0)} · 碎屑 {s.get('foods', 0)}"
+            + (f" · 待受精 ♀{s.get('unmated', 0)}" if s.get("unmated", 0) else "")
         )
         self.label_stat_runtime.setText(
             f"画质 LOD{s.get('quality', 2)} · 帧率上限 {s.get('fps', 0)} FPS · "
@@ -540,6 +577,7 @@ class SettingsWindow(QWidget):
             ("console", self.label_hotkey_console),
             ("visible", self.label_hotkey_visible),
             ("burst", self.label_hotkey_burst),
+            ("swatter", self.label_hotkey_swatter),
         )
         for name, label in pairs:
             info = hotkeys.get(name) or {}
@@ -590,10 +628,32 @@ class SettingsWindow(QWidget):
     def _on_spawn_foods_clicked(self) -> None:
         if self.on_spawn_foods is None:
             return
-        out = self.on_spawn_foods(self.spin_food_count.value())
+        key = self.combo_food_kind.currentData() or RANDOM_KEY
+        out = self.on_spawn_foods(self.spin_food_count.value(), key)
         n = len(out) if out is not None else 0
-        self._toast(f"已投放 {n} 块碎屑")
+        if key == RANDOM_KEY:
+            names = "、".join(sorted({f.name for f in out or []})) or "混合"
+            self._toast(f"已投放 {n} 块食物：{names}")
+        else:
+            self._toast(f"已投放 {n} 块 {BY_KEY.get(key, BY_KEY[DEFAULT_KEY]).name}")
         self._refresh_stats()
+
+    def _update_food_hint(self) -> None:
+        """下拉切换时说明这种食物是什么、多少营养、能放多久。"""
+        key = self.combo_food_kind.currentData() or RANDOM_KEY
+        if key == RANDOM_KEY:
+            avg = sum(k.nutrition for k in BY_KEY.values()) / max(1, len(BY_KEY))
+            life = sum(k.shelf_life for k in BY_KEY.values()) / max(1, len(BY_KEY))
+            self.label_food_hint.setText(
+                f"每块随机挑一种（按营养加权，低营养的更常见），共 {len(BY_KEY)} 种，"
+                f"均 {avg:.0f} 营养 / 平均 {life:.0f} 秒腐烂"
+            )
+            return
+        k = BY_KEY.get(key, BY_KEY[DEFAULT_KEY])
+        self.label_food_hint.setText(
+            f"{k.note} · 营养 {k.nutrition:.0f} · 可同时 {k.slots} 只进食 · "
+            f"{k.shelf_life:.0f} 秒后烂光（中途营养最多流失 45%）"
+        )
 
     def _on_clear_all_clicked(self) -> None:
         if self.on_clear_all:
@@ -707,19 +767,19 @@ class SettingsWindow(QWidget):
         rep_form.setSpacing(9)
 
         self.combo_reproduce_mode = QComboBox()
-        self.combo_reproduce_mode.addItem("自动繁殖模式 (无性别直接受孕产卵)", "auto")
-        self.combo_reproduce_mode.addItem("轻量有性繁殖模式 (雌雄相遇尾对尾交尾)", "sexual")
+        self.combo_reproduce_mode.addItem("简化交配 (雌雄靠近即受孕，过程短)", "auto")
+        self.combo_reproduce_mode.addItem("写实有性 (尾对尾长时交尾，受惊即断)", "sexual")
         rep_form.addRow("繁殖模式选择:", self.combo_reproduce_mode)
 
         self.spin_mating_radius = QDoubleSpinBox()
         self.spin_mating_radius.setRange(50.0, 500.0)
         self.spin_mating_radius.setSingleStep(10.0)
-        rep_form.addRow("有性寻偶感应距离 (像素):", self.spin_mating_radius)
+        rep_form.addRow("寻偶感应距离 (像素):", self.spin_mating_radius)
 
         self.spin_female_ratio = QDoubleSpinBox()
         self.spin_female_ratio.setRange(0.1, 0.9)
         self.spin_female_ratio.setSingleStep(0.05)
-        rep_form.addRow("雌性比例 (仅有性模式生效):", self.spin_female_ratio)
+        rep_form.addRow("雌性比例 (仅雌虫可产卵):", self.spin_female_ratio)
 
         self.spin_min_energy = QDoubleSpinBox()
         self.spin_min_energy.setRange(20.0, 95.0)
@@ -732,6 +792,23 @@ class SettingsWindow(QWidget):
         self.spin_reproduce_cd = QDoubleSpinBox()
         self.spin_reproduce_cd.setRange(5.0, 300.0)
         rep_form.addRow("成虫繁殖冷却时间 (秒):", self.spin_reproduce_cd)
+
+        self.spin_broods = QSpinBox()
+        self.spin_broods.setRange(1, 9)
+        self.spin_broods.setToolTip(
+            "雌虫储精：交配一次能连产几枚卵鞘。数值越大，雄虫的存在感越低"
+        )
+        rep_form.addRow("单次交配可产卵次数 (枚):", self.spin_broods)
+
+        self.spin_auto_mate = QDoubleSpinBox()
+        self.spin_auto_mate.setRange(0.3, 10.0)
+        self.spin_auto_mate.setSingleStep(0.1)
+        rep_form.addRow("简化交配耗时 (秒):", self.spin_auto_mate)
+
+        self.spin_mate_time = QDoubleSpinBox()
+        self.spin_mate_time.setRange(0.5, 15.0)
+        self.spin_mate_time.setSingleStep(0.1)
+        rep_form.addRow("尾对尾交尾耗时 (秒):", self.spin_mate_time)
 
         self.check_allow_near_cap = QCheckBox("允许在生物数量接近上限时仍强行繁殖")
         rep_form.addRow(self.check_allow_near_cap)
@@ -895,6 +972,44 @@ class SettingsWindow(QWidget):
         v_form.addRow(voice_hint)
         layout.addWidget(voice_group)
 
+        # 5. 拍死音效（蟑螂被拍中时喊的那一声）
+        squash_group = QGroupBox("拍死音效")
+        s_form = QFormLayout(squash_group)
+        s_form.setSpacing(10)
+        self.check_squash_voice = QCheckBox("拍死时发出叫声")
+        s_form.addRow(self.check_squash_voice)
+
+        self.combo_squash_variant = QComboBox()
+        # 由 SOUND_SETS 建列表，顺序跟着 LABELS 走 —— 加素材组只改一处，
+        # 不用在 UI 里再补一行 addItem（漏改就是"选了但没效果"）
+        for key, label in SOUND_SET_LABELS.items():
+            if key not in SOUND_SETS:
+                continue
+            self.combo_squash_variant.addItem(
+                f"{label}（默认）" if key == DEFAULT_SET else label, key)
+        s_form.addRow("叫声来源:", self.combo_squash_variant)
+
+        self.spin_squash_volume = QDoubleSpinBox()
+        self.spin_squash_volume.setRange(0.0, 1.0)
+        self.spin_squash_volume.setSingleStep(0.05)
+        s_form.addRow("拍死音效音量 (0~1):", self.spin_squash_volume)
+
+        self.btn_preview_squash = QPushButton("🔊 试听三个变体")
+        self.btn_preview_squash.clicked.connect(self._on_preview_squash_clicked)
+        s_form.addRow(self.btn_preview_squash)
+
+        squash_hint = QLabel(
+            "默认是完整一句 2.42 秒（啊哈 → 中间一句 → 打咩打咩），三个升调变体：原调 / +2 / +4 半音；"
+            "也可以切到只留「啊哈 + 打咩打咩」的 1.51 秒剪辑版。"
+            "它比「啪叽」晚 25ms 起音（先接触、后出声）。"
+            "完整一句**不叠加**：喊到 85%（打咩已经出来）之前再拍不响，"
+            "免得每句都被顶掉、永远听不到结尾。"
+        )
+        squash_hint.setWordWrap(True)
+        squash_hint.setStyleSheet("color: #8f90a0;")
+        s_form.addRow(squash_hint)
+        layout.addWidget(squash_group)
+
         layout.addStretch()
         return widget
 
@@ -905,6 +1020,107 @@ class SettingsWindow(QWidget):
     def _on_preview_voice_clicked(self) -> None:
         if self.on_preview_voice:
             self.on_preview_voice()
+
+    def _on_preview_squash_clicked(self) -> None:
+        if self.on_preview_squash_voice:
+            self.on_preview_squash_voice()
+
+    def _build_swatter_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        group = QGroupBox("蟑螂拍（持拍模式）")
+        form = QFormLayout(group)
+        form.setSpacing(10)
+
+        self.check_swatter = QCheckBox("启用蟑螂拍（右键 / 热键 / 闲置可随时放下）")
+        form.addRow(self.check_swatter)
+
+        self.spin_swatter_radius = QSpinBox()
+        self.spin_swatter_radius.setRange(30, 70)
+        self.spin_swatter_radius.setSuffix(" px")
+        form.addRow("拍面判定半径:", self.spin_swatter_radius)
+
+        radius_hint = QLabel(
+            "必须 ≥ 55px：蟑螂被贴近到 55px 会先僵直 0.12 秒才逃，我们的 70ms 挥拍正好落在"
+            "这个窗口里，体感才是「我压住了它」。调到 55 以下就会出现「刚贴近它反而跑了」。"
+        )
+        radius_hint.setWordWrap(True)
+        radius_hint.setStyleSheet("color: #8f90a0;")
+        form.addRow(radius_hint)
+
+        self.spin_swatter_size = QDoubleSpinBox()
+        self.spin_swatter_size.setRange(0.50, 1.20)
+        self.spin_swatter_size.setSingleStep(0.05)
+        self.spin_swatter_size.setDecimals(2)
+        self.spin_swatter_size.setSuffix(" ×")
+        form.addRow("拍子显示大小:", self.spin_swatter_size)
+
+        size_hint = QLabel(
+            "只改观感，不改判定。1.00 是原始尺寸：拍面宽 168px，比判定圈（直径约 131px）"
+            "还宽一圈，会出现「看着盖住了它却没死」；0.70 时拍面约 118px，略小于判定圈，"
+            "手感变成「擦到边也算中」。"
+        )
+        size_hint.setWordWrap(True)
+        size_hint.setStyleSheet("color: #8f90a0;")
+        form.addRow(size_hint)
+
+        self.spin_swatter_cooldown = QSpinBox()
+        self.spin_swatter_cooldown.setRange(150, 600)
+        self.spin_swatter_cooldown.setSingleStep(10)
+        self.spin_swatter_cooldown.setSuffix(" ms")
+        form.addRow("两次挥拍最小间隔:", self.spin_swatter_cooldown)
+
+        self.spin_swatter_idle = QDoubleSpinBox()
+        self.spin_swatter_idle.setRange(0.0, 60.0)
+        self.spin_swatter_idle.setSingleStep(1.0)
+        self.spin_swatter_idle.setSuffix(" 秒")
+        self.spin_swatter_idle.setSpecialValueText("不自动收拍")
+        form.addRow("闲置自动收拍:", self.spin_swatter_idle)
+
+        self.spin_swatter_splat = QDoubleSpinBox()
+        self.spin_swatter_splat.setRange(0.0, 2.0)
+        self.spin_swatter_splat.setSingleStep(0.1)
+        form.addRow("爆浆量倍率 (0~2):", self.spin_swatter_splat)
+
+        self.check_swatter_shake = QCheckBox("命中时轻微震屏（3px / 120ms）")
+        form.addRow(self.check_swatter_shake)
+
+        self.check_swatter_ootheca = QCheckBox("连母体拖着的卵鞘一起拍爆")
+        form.addRow(self.check_swatter_ootheca)
+
+        self.check_swatter_count = QCheckBox("统计「已拍死 N 只」（显示在托盘提示里）")
+        form.addRow(self.check_swatter_count)
+
+        self.btn_toggle_swatter = QPushButton("🔨 立即拿起 / 放下拍子")
+        self.btn_toggle_swatter.clicked.connect(self._on_toggle_swatter_clicked)
+        form.addRow(self.btn_toggle_swatter)
+
+        layout.addWidget(group)
+
+        why = QGroupBox("为什么拿起拍子时桌面「点不动」")
+        w_layout = QVBoxLayout(why)
+        why_text = QLabel(
+            "平时这个程序只在自己身上接收鼠标（其余位置一律穿透给桌面），所以桌面图标、"
+            "任务栏、浏览器都能正常点。但「在空桌面上挥一拍」这个动作原本根本收不到 —— "
+            "空拍没有反馈，手感就是死的。\n\n"
+            "所以拍子是显式的持拍模式：拿起时才整屏接管鼠标，拍子跟着光标走，左键挥拍、"
+            "右键放下。放下（或 12 秒不挥、或隐藏蟑螂、或退出程序）立刻还回去。\n\n"
+            "⚠️ Esc 收不到 —— 覆盖层从不抢焦点（否则你打字都会被它吃掉）。右键才是最快的退路。"
+        )
+        why_text.setWordWrap(True)
+        why_text.setStyleSheet("color: #a9aab8;")
+        w_layout.addWidget(why_text)
+        layout.addWidget(why)
+
+        layout.addStretch()
+        return widget
+
+    def _on_toggle_swatter_clicked(self) -> None:
+        if self.on_toggle_swatter is None:
+            return
+        armed = bool(self.on_toggle_swatter())
+        self._toast("🔨 已拿起拍子：左键挥拍，右键放下" if armed else "🔨 已放下拍子")
 
     def _build_general_tab(self) -> QWidget:
         widget = QWidget()
@@ -930,6 +1146,9 @@ class SettingsWindow(QWidget):
 
         self.edit_hotkey_burst, box, self.label_hotkey_burst = self._hotkey_row()
         form.addRow("虫巢爆发（刷满屏）:", box)
+
+        self.edit_hotkey_swatter, box, self.label_hotkey_swatter = self._hotkey_row()
+        form.addRow("拿起 / 放下蟑螂拍:", box)
 
         conflict_hint = QLabel(
             "热键是系统独占的：如果提示「已被其他程序占用」，换一个组合即可。"
@@ -1002,6 +1221,10 @@ class SettingsWindow(QWidget):
         self.spin_panic_dur.setValue(float(cfg.get("creatures.cockroach.panic_duration", 2.4)))
         self.spin_food_interval.setValue(float(cfg.get("simulation.food_spawn_interval", 12.0)))
         self.spin_max_food.setValue(int(cfg.get("simulation.max_food_count", 8)))
+        food_kind = str(cfg.get("simulation.food_kind", RANDOM_KEY))
+        f_idx = self.combo_food_kind.findData(food_kind)
+        self.combo_food_kind.setCurrentIndex(max(0, f_idx))
+        self._update_food_hint()
 
         # 繁殖系统 (重点)
         rep_mode = str(cfg.get("lifecycle.reproduce_mode", "auto"))
@@ -1013,6 +1236,9 @@ class SettingsWindow(QWidget):
         self.spin_min_energy.setValue(float(cfg.get("lifecycle.reproduce_min_energy", 55.0)))
         self.spin_cost_energy.setValue(float(cfg.get("lifecycle.reproduce_cost_energy", 25.0)))
         self.spin_reproduce_cd.setValue(float(cfg.get("lifecycle.reproduce_cooldown", 28.0)))
+        self.spin_broods.setValue(int(cfg.get("lifecycle.fertilized_broods", 2)))
+        self.spin_auto_mate.setValue(float(cfg.get("lifecycle.auto_mating_time", 1.5)))
+        self.spin_mate_time.setValue(float(cfg.get("lifecycle.mating_duration", 2.2)))
         self.check_allow_near_cap.setChecked(bool(cfg.get("lifecycle.allow_reproduce_near_cap", False)))
 
         # 卵鞘与成长
@@ -1043,12 +1269,29 @@ class SettingsWindow(QWidget):
         self.check_voice.setChecked(bool(cfg.get("grab_voice.enabled", True)))
         self.check_voice_stop.setChecked(bool(cfg.get("grab_voice.stop_on_release", False)))
         self.spin_voice_volume.setValue(float(cfg.get("grab_voice.volume", 0.7)))
+        self.check_squash_voice.setChecked(bool(cfg.get("squash_voice.enabled", True)))
+        self.spin_squash_volume.setValue(float(cfg.get("squash_voice.volume", 0.75)))
+        _variant = str(cfg.get("squash_voice.variant", DEFAULT_SET))
+        _idx = self.combo_squash_variant.findData(_variant)
+        self.combo_squash_variant.setCurrentIndex(max(0, _idx))
+
+        # 蟑螂拍
+        self.check_swatter.setChecked(bool(cfg.get("swatter.enabled", True)))
+        self.spin_swatter_radius.setValue(int(cfg.get("swatter.head_radius", 44.0)))
+        self.spin_swatter_size.setValue(float(cfg.get("swatter.visual_scale", 0.70)))
+        self.spin_swatter_cooldown.setValue(int(cfg.get("swatter.cooldown_ms", 280)))
+        self.spin_swatter_idle.setValue(float(cfg.get("swatter.idle_disarm_seconds", 12.0)))
+        self.spin_swatter_splat.setValue(float(cfg.get("swatter.splat_amount", 1.0)))
+        self.check_swatter_shake.setChecked(bool(cfg.get("swatter.screen_shake", True)))
+        self.check_swatter_ootheca.setChecked(bool(cfg.get("swatter.can_squash_ootheca", True)))
+        self.check_swatter_count.setChecked(bool(cfg.get("swatter.count_kills", True)))
 
         # 常规与热键
         hk_console = str(cfg.get("app.hotkey_toggle_console", "Ctrl+Alt+R"))
         self._set_hotkey_edit(self.edit_hotkey_console, hk_console)
         self._set_hotkey_edit(self.edit_hotkey_visible, str(cfg.get("app.hotkey_toggle_visible", "Ctrl+Alt+H")))
         self._set_hotkey_edit(self.edit_hotkey_burst, str(cfg.get("app.hotkey_nest_burst", "Ctrl+Alt+B")))
+        self._set_hotkey_edit(self.edit_hotkey_swatter, str(cfg.get("app.hotkey_swatter", "Ctrl+Alt+S")))
         self.check_open_console.setChecked(bool(cfg.get("app.open_console_on_start", True)))
         self.check_start_hidden.setChecked(bool(cfg.get("app.start_hidden", False)))
         self.label_brand_hint.setText(
@@ -1084,6 +1327,7 @@ class SettingsWindow(QWidget):
         cfg.set("creatures.cockroach.panic_duration", self.spin_panic_dur.value())
         cfg.set("simulation.food_spawn_interval", self.spin_food_interval.value())
         cfg.set("simulation.max_food_count", self.spin_max_food.value())
+        cfg.set("simulation.food_kind", self.combo_food_kind.currentData() or RANDOM_KEY)
 
         # 繁殖系统 (重点保存)
         cfg.set("lifecycle.reproduce_mode", self.combo_reproduce_mode.currentData())
@@ -1092,6 +1336,9 @@ class SettingsWindow(QWidget):
         cfg.set("lifecycle.reproduce_min_energy", self.spin_min_energy.value())
         cfg.set("lifecycle.reproduce_cost_energy", self.spin_cost_energy.value())
         cfg.set("lifecycle.reproduce_cooldown", self.spin_reproduce_cd.value())
+        cfg.set("lifecycle.fertilized_broods", self.spin_broods.value())
+        cfg.set("lifecycle.auto_mating_time", self.spin_auto_mate.value())
+        cfg.set("lifecycle.mating_duration", self.spin_mate_time.value())
         cfg.set("lifecycle.allow_reproduce_near_cap", self.check_allow_near_cap.isChecked())
 
         cfg.set("lifecycle.ootheca_mode", self.combo_ootheca_mode.currentData())
@@ -1112,6 +1359,7 @@ class SettingsWindow(QWidget):
             "app.hotkey_toggle_console": ("显示/隐藏控制台", self._read_hotkey_edit(self.edit_hotkey_console)),
             "app.hotkey_toggle_visible": ("隐藏/显示桌面蟑螂", self._read_hotkey_edit(self.edit_hotkey_visible)),
             "app.hotkey_nest_burst": ("虫巢爆发", self._read_hotkey_edit(self.edit_hotkey_burst)),
+            "app.hotkey_swatter": ("拿起/放下蟑螂拍", self._read_hotkey_edit(self.edit_hotkey_swatter)),
         }
         for key, (label, spec) in hotkeys.items():
             norm = normalize_hotkey(spec)
@@ -1137,6 +1385,23 @@ class SettingsWindow(QWidget):
         cfg.set("grab_voice.enabled", self.check_voice.isChecked())
         cfg.set("grab_voice.stop_on_release", self.check_voice_stop.isChecked())
         cfg.set("grab_voice.volume", self.spin_voice_volume.value())
+        cfg.set("squash_voice.enabled", self.check_squash_voice.isChecked())
+        cfg.set("squash_voice.volume", self.spin_squash_volume.value())
+        cfg.set(
+            "squash_voice.variant",
+            self.combo_squash_variant.currentData() or DEFAULT_SET,
+        )
+
+        # 蟑螂拍
+        cfg.set("swatter.enabled", self.check_swatter.isChecked())
+        cfg.set("swatter.head_radius", float(self.spin_swatter_radius.value()))
+        cfg.set("swatter.visual_scale", float(self.spin_swatter_size.value()))
+        cfg.set("swatter.cooldown_ms", self.spin_swatter_cooldown.value())
+        cfg.set("swatter.idle_disarm_seconds", self.spin_swatter_idle.value())
+        cfg.set("swatter.splat_amount", self.spin_swatter_splat.value())
+        cfg.set("swatter.screen_shake", self.check_swatter_shake.isChecked())
+        cfg.set("swatter.can_squash_ootheca", self.check_swatter_ootheca.isChecked())
+        cfg.set("swatter.count_kills", self.check_swatter_count.isChecked())
 
         success = cfg.save()
         if not success:

@@ -7,6 +7,7 @@ from typing import Callable, Optional
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu, QApplication
 
+from .entities.food_kinds import BY_KEY, SIGNATURE_KEYS
 from .resources import ResourceManager
 
 logger = logging.getLogger("roachHub.tray")
@@ -28,6 +29,7 @@ class RoachTrayIcon(QSystemTrayIcon):
         on_spawn_roaches: Optional[Callable[..., object]] = None,
         on_spawn_foods: Optional[Callable[..., object]] = None,
         on_nest_burst: Optional[Callable[[], int]] = None,
+        on_toggle_swatter: Optional[Callable[[], bool]] = None,
     ) -> None:
         super().__init__()
         self.on_toggle_visible = on_toggle_visible
@@ -41,6 +43,7 @@ class RoachTrayIcon(QSystemTrayIcon):
         self.on_spawn_roaches = on_spawn_roaches
         self.on_spawn_foods = on_spawn_foods
         self.on_nest_burst = on_nest_burst
+        self.on_toggle_swatter = on_toggle_swatter
 
         self.setIcon(ResourceManager.get_tray_icon())
         self.setToolTip("roachHub - 高拟真生物模拟器")
@@ -61,6 +64,12 @@ class RoachTrayIcon(QSystemTrayIcon):
         self.console_action.triggered.connect(self.on_open_settings)
         menu.addAction(self.console_action)
 
+        # 🔨 蟑螂拍：这是唯一会让覆盖层"临时接管整屏鼠标"的入口，
+        # 文案必须在拿起/放下之间切换，否则用户不知道桌面为什么点不动了
+        self.swatter_action = QAction("🔨 拿起蟑螂拍", menu)
+        self.swatter_action.triggered.connect(self._handle_toggle_swatter)
+        menu.addAction(self.swatter_action)
+
         menu.addSeparator()
 
         # ⚡ 虫巢爆发放在最显眼的位置：这是"一键刷满屏"的入口
@@ -77,8 +86,20 @@ class RoachTrayIcon(QSystemTrayIcon):
             spawn_menu.addAction(act)
         menu.addMenu(spawn_menu)
 
-        food_menu = QMenu("🧀 投放食物", menu)
-        for label, count in (("投放一块碎屑", 1), ("投放十块碎屑", 10)):
+        food_menu = QMenu("🪳 投放食物", menu)
+        # 托盘只放"招牌几种"，23 种全塞进来菜单会长到屏幕外；
+        # 完整清单在控制台的「批量投放食物」里。招牌按"腐败快慢/营养高低"各取一个，
+        # 让用户一眼能试到腐肉（100s 就烂）和老鼠屎（380s 耐久）的差别。
+        for kind in SIGNATURE_KEYS:
+            k = BY_KEY.get(kind)
+            if k is None:
+                continue
+            act = QAction(f"{k.icon} {k.name}（{k.nutrition:.0f}·{k.shelf_life:.0f}s）",
+                          food_menu)
+            act.triggered.connect(lambda _=False, key=kind: self._handle_spawn_foods(1, key))
+            food_menu.addAction(act)
+        food_menu.addSeparator()
+        for label, count in (("随机混合 ×1", 1), ("随机混合 ×10", 10)):
             act = QAction(label, food_menu)
             act.triggered.connect(lambda _=False, c=count: self._handle_spawn_foods(c))
             food_menu.addAction(act)
@@ -114,24 +135,38 @@ class RoachTrayIcon(QSystemTrayIcon):
 
     # ------------------------------------------------------------ 热键文案
 
-    def set_hotkey_hints(self, console: str = "", visible: str = "", burst: str = "") -> None:
+    def set_hotkey_hints(
+        self, console: str = "", visible: str = "", burst: str = "", swatter: str = ""
+    ) -> None:
         """把已生效的热键写进菜单文案（微信也是这么提示用户的）。"""
         self.console_action.setText(f"🖥️ 打开控制台\t{console}" if console else "🖥️ 打开控制台")
         self.burst_action.setText(
             f"⚡ 虫巢爆发（一键刷满）\t{burst}" if burst else "⚡ 虫巢爆发（一键刷满）"
         )
+        self.set_swatter_armed(self.swatter_action.text().startswith("🔨 放下"), swatter)
         base = "隐藏桌面蟑螂" if self.toggle_action.text().startswith("隐藏") else "显示桌面蟑螂"
         self.toggle_action.setText(f"{base}\t{visible}" if visible else base)
 
-    def update_population_detail(self, females: int, males: int, nymphs: int, eggs: int) -> None:
+    def set_swatter_armed(self, armed: bool, hint: str = "") -> None:
+        """切托盘菜单里那一行拍子文案。`hint` 只在热键重注册时给一次。"""
+        if hint:
+            self._swatter_hint = hint
+        hint = getattr(self, "_swatter_hint", "")
+        base = "🔨 放下蟑螂拍（桌面暂时归拍子）" if armed else "🔨 拿起蟑螂拍"
+        self.swatter_action.setText(f"{base}\t{hint}" if hint else base)
+
+    def update_population_detail(
+        self, females: int, males: int, nymphs: int, eggs: int, kills: int = 0
+    ) -> None:
         """更新展示详细的群落性别与生命阶段统计。"""
         total = females + males + nymphs
         self.status_action.setText(
             f"🪳 存活: {total} 只 (成虫 ♀{females} ♂{males} / 若虫 {nymphs} / 卵鞘 {eggs})"
         )
-        self.setToolTip(
-            f"roachHub - 生态: 成虫♀{females} ♂{males} | 若虫{nymphs} | 卵鞘{eggs}"
-        )
+        tip = f"roachHub - 生态: 成虫♀{females} ♂{males} | 若虫{nymphs} | 卵鞘{eggs}"
+        if kills > 0:
+            tip += f" | 已拍死 {kills} 只"
+        self.setToolTip(tip)
 
     # ------------------------------------------------------------ 菜单动作
 
@@ -139,15 +174,21 @@ class RoachTrayIcon(QSystemTrayIcon):
         if self.on_nest_burst:
             self.on_nest_burst()
 
+    def _handle_toggle_swatter(self) -> None:
+        if not self.on_toggle_swatter:
+            return
+        armed = bool(self.on_toggle_swatter())
+        self.set_swatter_armed(armed)
+
     def _handle_spawn_roaches(self, count: int) -> None:
         if self.on_spawn_roaches is not None:
             self.on_spawn_roaches(count)
         elif count == 1:
             self.on_spawn_roach()
 
-    def _handle_spawn_foods(self, count: int) -> None:
+    def _handle_spawn_foods(self, count: int, kind: str | None = None) -> None:
         if self.on_spawn_foods is not None:
-            self.on_spawn_foods(count)
+            self.on_spawn_foods(count, kind)
         elif count == 1:
             self.on_spawn_food()
 

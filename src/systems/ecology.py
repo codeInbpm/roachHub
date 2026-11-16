@@ -27,5 +27,10 @@ class EcologySystem:
             else:
                 if on_entity_removed:
                     on_entity_removed(entity.id)
-                logger.info("清理已死亡实体: ID=%s", entity.id)
+                logger.info(
+                    "清理已死亡实体: ID=%s 类型=%s 死因=%s",
+                    entity.id,
+                    type(entity).__name__,
+                    getattr(entity, "death_reason", "") or "unknown",
+                )
         return survivors

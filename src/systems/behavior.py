@@ -34,6 +34,11 @@ class BehaviorSystem:
 
         self._decision_timers: Dict[str, float] = {}
         self._last_cursor_pos: Optional[Vector2D] = None
+        # 每只虫选定的进食方位角缓存：id -> (food.id, angle)。
+        # 不能每帧重算——取样出来的角度会随身体绕行抖动，虫就会左右摇摆。
+        self._slot_aim: Dict[str, tuple[str, float]] = {}
+        # 预定方位按食物分桶：food.id -> {roach_id: angle}，只用于互相让位
+        self._slot_reserve: Dict[str, Dict[str, float]] = {}
 
     def update_config(self, cfg: dict) -> None:
         self.thigmotaxis_weight = float(cfg.get("thigmotaxis_weight", self.thigmotaxis_weight))
@@ -73,6 +78,12 @@ class BehaviorSystem:
             self._update_cockroach_behavior(entity, foods, timer, dt)
 
         self._last_cursor_pos = cursor_pos
+
+        # 方位角缓存只对活着的个体有意义；攒多了顺手清一次，别让它随尸体无限增长
+        if len(self._slot_aim) > 64:
+            alive = {e.id for e in entities if e.is_alive}
+            for k in [k for k in self._slot_aim if k not in alive]:
+                self._drop_aim(k)
 
     def _compute_circadian_factor(self) -> float:
         """根据当前系统时间计算昼夜活跃度因子。"""
@@ -122,6 +133,14 @@ class BehaviorSystem:
             roach.threat_proximity = max(0.0, 0.85 * (1.0 - (dist - r_far) / 700.0))
 
         if roach.state in (EntityState.PANIC, EntityState.FREEZE, EntityState.DRAGGED):
+            return
+
+        # 交尾中：状态归繁殖系统所有，这里只保留"受惊会被打断"这一个入口。
+        # 不加这个分支的话，光标进入中距离就会把两只正在交配的虫改回 WALK，
+        # 交尾进度永远走不完 —— 有性模式因此几乎产不出卵鞘。
+        if roach.state == EntityState.MATING:
+            if dist < r_panic:
+                roach.begin_prestartle(cursor_pos, 0.12)
             return
 
         if dist < r_panic:
@@ -181,6 +200,21 @@ class BehaviorSystem:
             self._tick_eating(roach, dt)
             return
 
+        # 交尾中：由繁殖系统接管，行为层不得改状态、不得让它走
+        if roach.state == EntityState.MATING:
+            roach.target_speed = 0.0
+            return
+
+        # 求偶驱力（繁殖系统写入 mate_seek）：优先级高于漫步与觅食。
+        # 这是"雌虫在释放信息素、雄虫逆着气味找过来"那段可见的过程。
+        if roach.mate_seek is not None:
+            to_target = roach.mate_seek - roach.pos
+            roach.state = EntityState.WALK
+            roach.target_angle = to_target.angle()
+            roach.target_speed = roach.min_walk_speed * 1.35 * roach.circadian_factor
+            self._decision_timers[roach.id] = max(timer, 0.25)
+            return
+
         # 觅食与进食判定 (饥饿驱动)
         if roach.energy < 75.0 and foods:
             target = self._pick_food(roach, foods)
@@ -195,9 +229,31 @@ class BehaviorSystem:
                     return
             else:
                 food, dist = target
-                # 停下来的距离要够它把头探到食物上：体长约一半，否则食物会被压在身体下面
-                stop_dist = max(32.0, roach.body_len * 0.62)
-                if dist < stop_dist and food.claim(roach.id):
+                # 停靠距离 = 口器前沿 + 食物当前半径的 70%。
+                # 原来写死 max(32, 体长*0.62)：食物半径只有 7~15 px 时代还凑合，
+                # 换成照片贴图后半径到了 17~35，大块食物会被虫体整个压住，
+                # 看起来像"站在食物上"而不是"在边上啃"。
+                # 现在按食物实时半径算：虫停在边上，头部前缘压在食物表面。
+                # 系数 0.70 是量出来的视觉最优：0.58 时头埋进食物、三只同吃会把
+                # 69px 的腐肉完全挡住；0.80 时只剩天线尖碰一下，像在闻不像在啃。
+                mouth = roach.body_len * 0.52 * roach.scale
+                ring = max(26.0, mouth + food.visual_radius * 0.70)
+                aim_ang = self._slot_aim_angle(roach, food)
+
+                if dist < ring * 2.4:
+                    # 进了两倍停靠环：不再直冲中心，而是绕到自己那个空位上
+                    aim = Vector2D(food.pos.x + math.cos(aim_ang) * ring,
+                                   food.pos.y + math.sin(aim_ang) * ring)
+                    reach = roach.pos.distance_to(aim)
+                else:
+                    self._drop_aim(roach.id)
+                    aim = food.pos
+                    reach = dist
+
+                # 判定圈 5px：给"减速刹车"留的余量。写 9px 时收速要滑 5px，
+                # 虫会停在环外一格，小食物的口器就悬在边上了。
+                if (reach < 5.0 or dist < ring * 0.55) and food.claim(roach.id, aim_ang):
+                    self._drop_aim(roach.id)
                     roach.state = EntityState.EAT
                     roach.eating_food = food
                     roach.bite_timer = 0.30
@@ -205,8 +261,9 @@ class BehaviorSystem:
                     roach.target_angle = (food.pos - roach.pos).angle()
                     return
                 roach.state = EntityState.WALK
-                roach.target_angle = (food.pos - roach.pos).angle()
-                roach.target_speed = roach.max_walk_speed
+                roach.target_angle = (aim - roach.pos).angle()
+                # 贴近后减速：全速冲向一个 5px 的判定圈会来回蹭过站不住
+                roach.target_speed = roach.max_walk_speed * (0.55 if dist < ring * 1.6 else 1.0)
                 return
 
         # 正常状态下的自主漫步与梳理切换
@@ -245,6 +302,56 @@ class BehaviorSystem:
             self._decision_timers[roach.id] = next_duration
         else:
             self._decision_timers[roach.id] = timer
+
+    def _slot_aim_angle(self, roach: Cockroach, food: Food) -> float:
+        """这只虫选定的进食方位角，逐帧复用（换目标食物则重选）。
+
+        直接每帧调 ``open_slot_angle`` 会抖：身体在环上绕行时"来向"一直在转，
+        取样出来的最优角度会在相邻档位之间跳，表现成原地左右摇摆。
+        所以选定一次就钉住，直到它真的吃上或换了目标。
+
+        预定方位按食物分桶存（``_slot_reserve[food_id][roach_id]``），
+        这样每次只扫这一块食物的几个人，不会退化成"每只虫扫全部虫"。
+        """
+        cached = self._slot_aim.get(roach.id)
+        if cached is not None and cached[0] == food.id:
+            ang = cached[1]
+            # 别人已经站到（或正走向）同一个方位就重选一次；没冲突就一直沿用，
+            # 避免每帧重算带来的左右摇摆。
+            taken = [a for k, a in food.slot_angles.items()
+                     if k in food.eaters and k != roach.id]
+            taken += [a for k, a in self._slot_reserve.get(food.id, {}).items()
+                      if k != roach.id]
+            if not taken or min(abs(normalize_angle(ang - t)) for t in taken) > 0.7:
+                return ang
+        # 已经在吃的 + 还在路上但预定了方位的，都要避开
+        taken = [a for k, a in food.slot_angles.items() if k in food.eaters]
+        taken += [a for k, a in self._slot_reserve.get(food.id, {}).items()
+                  if k != roach.id]
+        ang = food.open_slot_angle(roach.pos, taken)
+        self._set_aim(roach.id, food, ang)
+        return ang
+
+    def _set_aim(self, roach_id: str, food: Food, ang: float) -> None:
+        old = self._slot_aim.get(roach_id)
+        if old is not None and old[0] != food.id:
+            self._forget_reserve(old[0], roach_id)
+        self._slot_aim[roach_id] = (food.id, ang)
+        self._slot_reserve.setdefault(food.id, {})[roach_id] = ang
+
+    def _drop_aim(self, roach_id: str) -> None:
+        """吃上了 / 放弃目标：把预定方位一起退掉，让后来者能用这个位置。"""
+        old = self._slot_aim.pop(roach_id, None)
+        if old is not None:
+            self._forget_reserve(old[0], roach_id)
+
+    def _forget_reserve(self, food_id: str, roach_id: str) -> None:
+        reserve = self._slot_reserve.get(food_id)
+        if reserve is None:
+            return
+        reserve.pop(roach_id, None)
+        if not reserve:                      # 空桶直接扔掉，别攒一堆死食物的空 dict
+            self._slot_reserve.pop(food_id, None)
 
     @staticmethod
     def _nearest_edible(roach: Cockroach, foods: List[Food]) -> Optional[Food]:

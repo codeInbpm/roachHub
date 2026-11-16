@@ -25,6 +25,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "hotkey_toggle_console": "Ctrl+Alt+R",
         "hotkey_toggle_visible": "Ctrl+Alt+H",
         "hotkey_nest_burst": "Ctrl+Alt+B",
+        # 第 4 个热键：拿起/放下蟑螂拍（持拍期间整屏接管鼠标）
+        "hotkey_swatter": "Ctrl+Alt+S",
     },
     "render": {
         "style": "realistic",
@@ -42,6 +44,27 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "interaction": {
         "drag_enabled": True,
+    },
+    "swatter": {
+        # 总开关（关掉后托盘 / 热键都不可用，覆盖层永远保持"只在虫身上收鼠标"）
+        "enabled": True,
+        # 拍面判定半径：必须 ≥ 蟑螂的 perception_panic_radius(55)，否则会出现
+        # "刚贴近它反而跑了"。默认 44 + 0.30×体长 ≈ 65px
+        "head_radius": 44.0,
+        # 拍子的观感大小（只影响画面，不改判定）。1.0 = 原始尺寸，
+        # 那时拍面宽 168 > 判定直径 131，会"看着盖住却没死"；0.70 更贴手。
+        "visual_scale": 0.70,
+        "swing_ms": 70,              # 下压时长（4.2 帧 @60FPS，读得出"手在动"）
+        "recover_ms": 200,           # 抬拍恢复
+        "cooldown_ms": 280,          # 两次挥拍最小间隔（从 WINDUP 起算）
+        "idle_disarm_seconds": 12.0, # 闲置自动收拍（0 = 不自动）
+        "splat_amount": 1.0,         # 爆浆量倍率 0~2（颗粒数 / 污渍大小）
+        "linger_seconds": 22.0,      # 尸体 + 主污渍停留
+        "max_particles": 14,         # 单次击杀颗粒上限
+        "screen_shake": True,        # 命中震屏
+        "scare_radius": 240.0,       # 拍击惊逃半径（0 = 不惊动邻居）
+        "can_squash_ootheca": True,  # 能不能把拖着的卵鞘一起拍爆
+        "count_kills": True,         # 托盘 / 控制台统计"已拍死 N 只"
     },
     "trails": {
         "enabled": True,
@@ -61,6 +84,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         # 默认让整句「你干嘛~哎呦」说完：拖拽通常不到 1 秒，松手即停会让「哎呦」永远听不见
         "stop_on_release": False,
     },
+    "squash_voice": {
+        # 拍死时蟑螂喊的那一声。variant 见 squash_voice.SOUND_SETS：
+        # "myinstants"（默认，完整一句 2.42 秒）/ "myinstants_short"（1.51 秒剪辑）
+        # / "yamero" / "aiyo"
+        "enabled": True,
+        "volume": 0.75,
+        "variant": "myinstants",
+    },
     "performance": {
         # true = 关闭帧预算自适应器，固定用 fixed_quality_level 指定的画质
         "fixed_quality": False,
@@ -75,6 +106,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "boundary_behavior": "rebound",
         "food_spawn_interval": 12.0,
         "max_food_count": 8,
+        # 自动投放的食物种类："random" = 按营养加权随机，或 food_kinds 里的 key
+        "food_kind": "random",
     },
     "behavior": {
         "thigmotaxis_weight": 0.55,
@@ -92,6 +125,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "reproduce_cost_energy": 25.0,
         "reproduce_cooldown": 28.0,
         "allow_reproduce_near_cap": False,
+        # 一次交配能支撑几次产卵（雌虫储精）；0 无效，最小 1
+        "fertilized_broods": 2,
+        # 简化交配（auto 模式）与尾对尾交尾（sexual 模式）的时长
+        "auto_mating_time": 1.5,
+        "mating_duration": 2.2,
         "ootheca_mode": "carried",
         "egg_incubation_time": 15.0,
         "nymphs_per_ootheca_min": 1,

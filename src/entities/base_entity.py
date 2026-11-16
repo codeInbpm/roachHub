@@ -41,6 +41,16 @@ class BaseEntity:
     # 能否被鼠标"认领"（抓取 / 惊吓）。蜕下来的空壳之类只是布景，设为 False。
     interactive: bool = True
 
+    # 是否参与 NeedsSystem 的代谢。食物、卵鞘、空壳、尸体都没有"生理需求"，
+    # 设在基类默认 True、由各子类关掉：不关的话一块没被吃掉的食物会在
+    # 代谢 334 秒后能量归零、掉血、自己 "die('starvation')" 凭空消失。
+    metabolizes: bool = True
+
+    # 能量见底后每秒掉多少血。按 dt 结算（旧代码是每帧固定 -2.5，等于
+    # 60fps 下 150 血/秒、30fps 下 75 血/秒 —— 死亡速度跟着帧率变，
+    # 低画质模式下虫反而死得更慢。这里改成固定 150 血/秒）。
+    STARVATION_DPS: float = 150.0
+
     def __init__(
         self,
         x: float = 0.0,
@@ -72,6 +82,10 @@ class BaseEntity:
         self.state: EntityState = EntityState.IDLE
         self.stage: LifeStage = LifeStage.NYMPH
         self.is_alive: bool = True
+        # 死因（"starvation" / "natural_lifespan" / "swatted" ...）。以前 die()
+        # 收下 reason 又立刻丢掉，实体被清理时只剩一行"清理已死亡实体: ID=x"，
+        # 完全没法回答"它到底是怎么死的"。
+        self.death_reason: str = ""
 
         # 若虫多龄期 (Instar) 机制
         self.instar: int = 1
@@ -92,6 +106,9 @@ class BaseEntity:
         self.reproduce_timer: float = 10.0
         self.is_carrying_ootheca: bool = False
         self.carried_ootheca: Optional[Any] = None
+        # 受精额度：一次交配还能支撑几次产卵。0 = 处女（雌虫未受精不能产卵），
+        # 由繁殖系统在交尾完成后写入。真实蟑螂雌虫会储精，所以一次交配能连产几枚。
+        self.broods_left: int = 0
 
         # 应激、恐惧与警觉系统 (高拟真核心)
         self.panic_timer: float = 0.0
@@ -223,10 +240,15 @@ class BaseEntity:
     def render(self, painter: QPainter) -> None:
         pass
 
-    def consume_energy(self, amount: float) -> None:
+    def consume_energy(self, amount: float, dt: float = 1.0 / 60.0) -> None:
+        """扣能量；能量见底后按时间掉血，血量归零即饿死。
+
+        ``dt`` 默认 1/60 是为了兼容那些"一次性消耗"的调用点（如繁殖扣能量），
+        它们只关心当帧扣多少血，不需要真实时间步长。
+        """
         self.energy = max(0.0, self.energy - amount)
         if self.energy <= 0.0:
-            self.health = max(0.0, self.health - 2.5)
+            self.health = max(0.0, self.health - self.STARVATION_DPS * dt)
             if self.health <= 0.0:
                 self.die("starvation")
 
@@ -236,5 +258,6 @@ class BaseEntity:
 
     def die(self, reason: str = "natural") -> None:
         self.is_alive = False
+        self.death_reason = reason
         self.state = EntityState.DEAD
         self.stage = LifeStage.DEAD

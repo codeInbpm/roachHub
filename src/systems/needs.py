@@ -15,6 +15,10 @@ class NeedsSystem:
         for entity in entities:
             if not entity.is_alive:
                 continue
+            # 只有真正有生理需求的个体才代谢。食物/卵鞘/空壳/尸体都不该参与，
+            # 否则它们会"饿死"自己（一块食物 334 秒后凭空消失）。
+            if not getattr(entity, "metabolizes", True):
+                continue
 
             # 基础代谢率：恐慌狂奔时消耗加倍
             burn_rate = self.energy_decay_rate
@@ -23,4 +27,4 @@ class NeedsSystem:
             elif entity.state == EntityState.IDLE:
                 burn_rate *= 0.5
 
-            entity.consume_energy(burn_rate * dt)
+            entity.consume_energy(burn_rate * dt, dt)

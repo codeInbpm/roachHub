@@ -16,6 +16,8 @@ from .entities.base_entity import BaseEntity, EntityState, LifeStage
 from .entities.cockroach import Cockroach
 from .entities.ootheca import Ootheca
 from .entities.food import Food
+from .entities.food_kinds import pick_kind, RANDOM_KEY
+from .entities.squashed import SquashedRoach
 from .overlay_window import OverlayWindow
 from .tray import RoachTrayIcon
 from .settings_window import SettingsWindow
@@ -26,7 +28,10 @@ from .systems.lifecycle import LifecycleSystem
 from .systems.reproduction import ReproductionSystem
 from .systems.ecology import EcologySystem
 from .systems.audio import ScuttleAudio
+from .systems.splatter import SplatterSystem
+from .systems.swatter import Swatter
 from .systems.voice import GrabVoice
+from .systems.squash_voice import SquashVoice
 from .utils.hotkeys import GlobalHotkeyManager, supports_global_hotkeys
 from .utils.win_occlusion import covered_rects
 from .utils.math_utils import Vector2D
@@ -94,6 +99,17 @@ class RoachApp(QObject):
         self.overlay.set_trails_enabled(bool(self.config.get("trails.enabled", True)))
         self.overlay.drag_enabled = bool(self.config.get("interaction.drag_enabled", True))
 
+        # 苍蝇拍 + 爆浆。拍子只是"把鼠标闸门临时开一条缝"，所有伤害结算都在
+        # `_resolve_swat()` 里做 —— 它需要拿到完整的 entities 列表，所以放在 app 层。
+        self.splatter = SplatterSystem(
+            screen_shake=bool(self.config.get("swatter.screen_shake", True))
+        )
+        self.swatter = Swatter(self.config.get("swatter", {}))
+        self.swatter.on_impact = self._resolve_swat
+        self.swatter.on_state_changed = self._on_swatter_state_changed
+        self.overlay.attach_swatter(self.swatter)
+        self.overlay.splatter = self.splatter
+
         # 程序化音效（无音频设备时自动降级静音）
         self.audio = ScuttleAudio(
             enabled=bool(self.config.get("audio.enabled", True)),
@@ -109,6 +125,13 @@ class RoachApp(QObject):
             stop_on_release=bool(self.config.get("grab_voice.stop_on_release", False)),
         )
 
+        # 拍死时的叫声：默认完整一句（2.42 秒），可切剪辑版 / yamero / 哎哟
+        self.squash_voice = SquashVoice(
+            enabled=bool(self.config.get("squash_voice.enabled", True)),
+            volume=float(self.config.get("squash_voice.volume", 0.75)),
+            variant=str(self.config.get("squash_voice.variant", "myinstants")),
+        )
+
         self.tray = RoachTrayIcon(
             on_toggle_visible=self.toggle_visibility,
             on_spawn_roach=self.spawn_cockroach,
@@ -121,6 +144,7 @@ class RoachApp(QObject):
             on_spawn_roaches=self.spawn_batch,
             on_spawn_foods=self.spawn_foods,
             on_nest_burst=self.nest_burst,
+            on_toggle_swatter=self.toggle_swatter,
         )
 
         # 全局热键（RegisterHotKey）：应用没有焦点时也能召唤控制台/放虫。
@@ -219,6 +243,11 @@ class RoachApp(QObject):
             str(self.config.get("app.hotkey_nest_burst", "Ctrl+Alt+B")),
             lambda: self._guarded(self.nest_burst),
         )
+        self.hotkeys.bind(
+            "swatter",
+            str(self.config.get("app.hotkey_swatter", "Ctrl+Alt+S")),
+            lambda: self._guarded(self.toggle_swatter),
+        )
         if self.hotkeys.failures:
             logger.warning("部分全局热键未生效：%s", self.hotkeys.failures)
         self._sync_hotkey_hints()
@@ -246,7 +275,7 @@ class RoachApp(QObject):
     def hotkey_status(self) -> dict[str, dict[str, str | bool]]:
         """给控制台显示用：每个热键的规范串 / 是否注册成功 / 失败原因。"""
         out: dict[str, dict[str, str | bool]] = {}
-        for name in ("console", "visible", "burst"):
+        for name in ("console", "visible", "burst", "swatter"):
             out[name] = {
                 "spec": self.hotkeys.spec_of(name),
                 "ok": self.hotkeys.is_registered(name),
@@ -260,6 +289,7 @@ class RoachApp(QObject):
             console=self.hotkeys.spec_of("console"),
             visible=self.hotkeys.spec_of("visible"),
             burst=self.hotkeys.spec_of("burst"),
+            swatter=self.hotkeys.spec_of("swatter"),
         )
 
     def spawn_cockroach(
@@ -300,6 +330,10 @@ class RoachApp(QObject):
             shadow_intensity=shadow_intensity,
         )
         roach.instar_duration = float(self.config.get("lifecycle.instar_duration", 18.0))
+        # 直接投放的成体当作"野生成虫"：多半已经被交配过，先给 1 次产卵额度，
+        # 免得投进去半天不见卵。由卵鞘孵化、自己长成的个体仍是处女，必须先找雄虫。
+        if stage == LifeStage.ADULT and gender == "female":
+            roach.broods_left = 1
         roach.on_footstep = self._on_footstep
         roach.on_smear = self._on_smear
         roach.on_sound = self._on_sound
@@ -313,8 +347,18 @@ class RoachApp(QObject):
             logger.debug("批量生成蟑螂: ID=%s (%s/%s)", roach.id, stage.name, gender)
         return roach
 
-    def spawn_food(self, x: float | None = None, y: float | None = None) -> Food:
-        """投放食物碎屑。"""
+    def spawn_food(
+        self,
+        x: float | None = None,
+        y: float | None = None,
+        kind: str | None = None,
+    ) -> Food:
+        """投放一块食物。
+
+        :param kind: ``food_kinds`` 里的 key；None 时读配置 ``simulation.food_kind``
+        """
+        if kind is None:
+            kind = str(self.config.get("simulation.food_kind", RANDOM_KEY))
         screen_geom = self.qapp.primaryScreen().geometry()
         pad = float(self.config.get("simulation.boundary_padding", 45.0))
 
@@ -337,9 +381,12 @@ class RoachApp(QObject):
                 x = random.uniform(pad + 90.0, screen_geom.width() - pad - 90.0)
                 y = random.uniform(pad + 90.0, screen_geom.height() - pad - 90.0)
 
-        food = Food(x=x, y=y, nutrition=40.0)
+        food = Food(x=x, y=y, kind=pick_kind(kind))
         self.entities.append(food)
-        logger.info("投放食物碎屑: ID=%s (坐标: %.1f, %.1f)", food.id, x, y)
+        logger.info(
+            "投放食物 %s %s: ID=%s 营养=%.0f (坐标: %.1f, %.1f)",
+            food.kind.icon, food.name, food.id, food.nutrition, x, y,
+        )
         return food
 
     # ---------------------------------------------------------------- 批量投放
@@ -403,11 +450,15 @@ class RoachApp(QObject):
         self._update_tray_counts()
         return out
 
-    def spawn_foods(self, count: int = 5) -> list[Food]:
-        """批量投放食物碎屑。"""
+    def spawn_foods(self, count: int = 5, kind: str | None = None) -> list[Food]:
+        """批量投放食物。
+
+        :param kind: 指定种类则全部相同；``"random"`` / None 逐块按营养加权随机
+        """
         n = max(1, min(int(count), 40))
-        out = [self.spawn_food() for _ in range(n)]
-        logger.info("批量投放 %d 块食物", n)
+        out = [self.spawn_food(kind=kind) for _ in range(n)]
+        names = sorted({f.name for f in out})
+        logger.info("批量投放 %d 块食物：%s", n, "、".join(names))
         return out
 
     def nest_burst(self) -> int:
@@ -440,6 +491,9 @@ class RoachApp(QObject):
                 e.trigger_freeze_and_panic(center, duration)
 
     def clear_all(self) -> None:
+        # 拍子必须先放下：否则屏幕还处于"整屏接管"状态，用户会觉得桌面点不动了
+        self.swatter.disarm("clear_all")
+        self.splatter.clear()
         for e in self.entities:
             self.behavior_system.cleanup_entity(e.id)
         self.entities.clear()
@@ -450,9 +504,137 @@ class RoachApp(QObject):
 
     def toggle_visibility(self) -> bool:
         self.is_sim_visible = not self.is_sim_visible
+        if not self.is_sim_visible:
+            # 隐藏蟑螂还攥着拍子 = 一个看不见但吃掉所有点击的全屏窗口
+            self.swatter.disarm("hidden")
         self.overlay.set_simulation_visible(self.is_sim_visible)
         logger.info("切换可见性: %s", "显示" if self.is_sim_visible else "隐藏")
         return self.is_sim_visible
+
+    # ---------------------------------------------------------------- 苍蝇拍
+
+    def toggle_swatter(self) -> bool:
+        """拿起 / 放下蟑螂拍 —— 桌面端唯一会"整屏接管鼠标"的入口。"""
+        if not self.swatter.enabled:
+            logger.info("苍蝇拍已在设置里关闭")
+            return False
+        if not self.is_sim_visible:
+            logger.info("桌面蟑螂已隐藏，先显示蟑螂再拿拍子")
+            return False
+        armed = self.swatter.toggle(self._cursor_pos)
+        logger.info(
+            "苍蝇拍: %s", "已拿起（整屏接管，右键/热键/12 秒闲置放下）" if armed else "已放下"
+        )
+        return armed
+
+    def _on_swatter_state_changed(self) -> None:
+        """拿起/放下时的统一善后：光标、托盘文案、统计。"""
+        self.overlay.sync_swatter_cursor()
+        self.tray.set_swatter_armed(self.swatter.armed)
+        self._tray_update_at = 0.0
+        self._update_tray_counts()
+
+    def _resolve_swat(self, hit_point: Vector2D, direction: Vector2D) -> None:
+        """一次挥拍的结算（WINDUP 结束那一帧调用）。"""
+        max_victims = max(1, int(self.swatter.max_victims))
+        candidates: list[tuple[float, Cockroach]] = []
+        for e in self.entities:
+            if not isinstance(e, Cockroach) or not e.is_alive:
+                continue
+            if e.state == EntityState.DRAGGED:
+                continue
+            if self.swatter.can_hit(e, hit_point):
+                candidates.append((e.pos.distance_to(hit_point), e))
+        candidates.sort(key=lambda item: item[0])
+        victims = [e for _, e in candidates[:max_victims]]
+
+        for roach in victims:
+            self._squash_roach(roach)
+
+        if victims:
+            self.swatter.kills += len(victims)
+            count = int(self.config.get("swatter.max_particles", 14))
+            self.splatter.spawn_impact(
+                hit_point.x,
+                hit_point.y,
+                direction=direction,
+                amount=float(self.swatter.splat_amount),
+                count=count,
+            )
+            # 音量随本次击杀数上浮：一只是"啪唧"，三只是"糊了一片"
+            volume = 0.42 if len(victims) == 1 else (0.52 if len(victims) == 2 else 0.60)
+            self.audio.play("splat", volume)
+            # 半声「哎哟」叠在撞击声之后 25ms —— 没有它，拍死像在拍一块肉
+            if self.audio.enabled:
+                self.squash_voice.play(len(victims))
+            logger.info("拍死 %d 只（累计 %d）", len(victims), self.swatter.kills)
+        else:
+            # 拍空也必须给反馈，否则挥空像点了张图。但**不留污渍**。
+            self.splatter.spawn_whiff(hit_point.x, hit_point.y)
+            self.audio.play("whiff", 0.30)
+
+        self._scare_near(hit_point, killed=bool(victims))
+        self._tray_update_at = 0.0
+        self._update_tray_counts()
+
+    def _squash_roach(self, roach: Cockroach) -> None:
+        """把一只活虫变成一具尸体 + 一摊污渍，并清掉它身上的所有挂靠。"""
+        # 1. 进食位点：不释放的话那块碎屑要白占 2.5 秒（痕迹层的 TTL 才兜底）
+        food = getattr(roach, "eating_food", None)
+        if food is not None:
+            try:
+                food.release(roach.id)
+            except Exception:
+                logger.debug("释放进食位点失败", exc_info=True)
+            roach.eating_food = None
+
+        # 2. 拖着的卵鞘一起爆：否则会留下一个没有母体的孤儿卵鞘继续孵化
+        ootheca = getattr(roach, "carried_ootheca", None)
+        if ootheca is not None:
+            if bool(self.config.get("swatter.can_squash_ootheca", True)):
+                ootheca.is_alive = False
+                ootheca.is_carried = False
+            else:
+                # 关掉"连卵鞘一起爆"时把它掉在原地，继续正常孵化
+                ootheca.is_carried = False
+                ootheca.pos = Vector2D(roach.pos.x, roach.pos.y)
+            ootheca.parent = None
+            roach.carried_ootheca = None
+            roach.is_carrying_ootheca = False
+
+        corpse = SquashedRoach.from_roach(
+            roach,
+            lifetime=float(self.config.get("swatter.linger_seconds", 22.0)),
+            splat_amount=float(self.swatter.splat_amount),
+        )
+        roach.die("squashed")
+        self.entities.append(corpse)
+
+        # 3. 飞溅进痕迹层：尸体 22 秒后消失，那几枚小斑点按痕迹的正常节奏淡出
+        self.overlay.add_splat(roach.pos.x, roach.pos.y, corpse.width * 0.6)
+
+    def _scare_near(self, hit_point: Vector2D, killed: bool) -> None:
+        """拍击惊逃 —— 这一条比所有粒子加起来都重要。
+
+        拍中时：240px 内全部僵直后炸开（"手起拍落，全场炸锅"）；
+        拍空时：180px 内只加警觉、记下威胁方向，**不**触发僵直狂逃 ——
+        否则在虫子旁边随便挥两下就成了赶虫器。
+        """
+        radius = float(self.config.get("swatter.scare_radius", 240.0))
+        for e in self.entities:
+            if not isinstance(e, Cockroach) or not e.is_alive:
+                continue
+            if e.state == EntityState.DRAGGED:
+                continue
+            dist = e.pos.distance_to(hit_point)
+            if killed:
+                if radius <= 0.0:
+                    return
+                if dist <= radius:
+                    e.trigger_freeze_and_panic(hit_point, 2.0)
+            elif dist <= 180.0:
+                e.alertness = min(1.0, e.alertness + 0.30)
+                e.threat_vector = hit_point - e.pos
 
     def open_settings(self) -> None:
         if self._settings_window is None:
@@ -461,12 +643,14 @@ class RoachApp(QObject):
                 on_applied=self.apply_runtime_settings,
                 on_clear_trails=self.clear_trails,
                 on_preview_voice=self.preview_grab_voice,
+                on_preview_squash_voice=self.preview_squash_voice,
                 on_nest_burst=self.nest_burst,
                 on_spawn_roaches=self.spawn_batch,
                 on_spawn_foods=self.spawn_foods,
                 on_clear_all=self.clear_all,
                 on_query_stats=self.console_stats,
                 on_toggle_sim_visible=self.toggle_visibility,
+                on_toggle_swatter=self.toggle_swatter,
             )
             self._settings_window.geometry_changed.connect(self._sync_console_hole)
         w = self._settings_window
@@ -583,7 +767,7 @@ class RoachApp(QObject):
 
     def console_stats(self) -> dict:
         """控制台顶部那块状态区要的数据（每次刷新都是现算，不做增量维护）。"""
-        adults_f = adults_m = nymphs = eggs = foods = alive = 0
+        adults_f = adults_m = nymphs = eggs = foods = alive = unmated = 0
         for e in self.entities:
             if isinstance(e, Cockroach):
                 if not e.is_alive:
@@ -593,6 +777,9 @@ class RoachApp(QObject):
                     nymphs += 1
                 elif e.gender == "female":
                     adults_f += 1
+                    # 待受精雌虫：能量够、但受精额度已空，正等着交配
+                    if getattr(e, "broods_left", 0) <= 0:
+                        unmated += 1
                 else:
                     adults_m += 1
             elif isinstance(e, Ootheca) and e.is_alive:
@@ -605,12 +792,15 @@ class RoachApp(QObject):
             "cap": cap,
             "females": adults_f,
             "males": adults_m,
+            "unmated": unmated,
             "nymphs": nymphs,
             "eggs": eggs,
             "foods": foods,
             "sim_visible": self.is_sim_visible,
             "quality": self._quality,
             "fps": self._fps_cap,
+            "kills": self.swatter.kills,
+            "swatter_armed": self.swatter.armed,
             "hotkeys": self.hotkey_status(),
         }
 
@@ -656,6 +846,19 @@ class RoachApp(QObject):
             volume=float(self.config.get("grab_voice.volume", 0.7)),
             stop_on_release=bool(self.config.get("grab_voice.stop_on_release", False)),
         )
+        self.squash_voice.apply_config(
+            enabled=bool(self.config.get("squash_voice.enabled", True)),
+            volume=float(self.config.get("squash_voice.volume", 0.75)),
+        )
+        self.squash_voice.set_variant(
+            str(self.config.get("squash_voice.variant", "myinstants"))
+        )
+
+        # 苍蝇拍：判径 / 冷却 / 闲置收拍 / 爆浆量
+        self.swatter.apply_config(self.config.get("swatter", {}))
+        self.splatter.screen_shake = bool(self.config.get("swatter.screen_shake", True))
+        if not self.swatter.enabled:
+            self.swatter.disarm("disabled")
 
         new_fps = int(self.config.get("app.target_fps", 60))
         if new_fps != self.target_fps:
@@ -681,9 +884,11 @@ class RoachApp(QObject):
 
     def quit(self) -> None:
         logger.info("正在退出 roachHub...")
+        self.swatter.disarm("quit")
         self.timer.stop()
         self.audio.stop_all()
         self.grab_voice.stop()
+        self.squash_voice.close()
         if self._settings_window:
             self._settings_window.close()
         self.overlay.close()
@@ -705,6 +910,13 @@ class RoachApp(QObject):
         if self._settings_window is not None:
             vol = float(self._settings_window.spin_voice_volume.value())
         self.grab_voice.preview(vol)
+
+    def preview_squash_voice(self) -> None:
+        """试听拍死音效：连播三个变体，让用户一次听出"三只一起死"的区别。"""
+        vol = 0.75
+        if self._settings_window is not None:
+            vol = float(self._settings_window.spin_squash_volume.value())
+        self.squash_voice.preview(vol)
 
     def _on_entity_dropped(self, entity: BaseEntity) -> None:
         logger.debug("松手释放实体: %s", entity.id)
@@ -849,7 +1061,10 @@ class RoachApp(QObject):
         nymphs = sum(1 for e in self.entities if isinstance(e, Cockroach) and e.stage == LifeStage.NYMPH and e.is_alive)
         eggs = sum(1 for e in self.entities if isinstance(e, Ootheca) and e.is_alive)
         self._tray_update_at = now
-        self.tray.update_population_detail(females, males, nymphs, eggs)
+        kills = self.swatter.kills if bool(self.config.get("swatter.count_kills", True)) else 0
+        self.tray.update_population_detail(
+            females, males, nymphs, eggs, kills=kills
+        )
 
     def _on_tick(self) -> None:
         """主循环。"""
@@ -867,6 +1082,11 @@ class RoachApp(QObject):
         qcursor_pos = QCursor.pos()
         cursor_vec = Vector2D(qcursor_pos.x(), qcursor_pos.y())
         self._cursor_pos = cursor_vec
+
+        # 0. 拍子与爆浆推进。放在实体更新之前：这一帧的击杀要**当帧**就出现在
+        #    绘制里，否则玩家会觉得"我拍下去了，它过了一帧才死"。
+        self.swatter.update(dt, cursor_vec)
+        self.splatter.update(dt)
 
         # 0. 食物生成
         food_interval = float(self.config.get("simulation.food_spawn_interval", 12.0))
@@ -935,6 +1155,8 @@ class RoachApp(QObject):
         elif roach_count > 55:
             self._quality = min(self._quality, 1)
         Cockroach.quality = self._quality
+        # 拍面网格跟着画质降档（>110 只时用 8 条主筋的简化贴图）
+        self.swatter.detail = self._quality
 
         # 9. 渲染层（痕迹 + 实体）；遮罩只在非 Windows 平台按 4Hz 兜底更新
         self.overlay.tick_trails(dt)

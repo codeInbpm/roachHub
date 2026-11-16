@@ -558,7 +558,11 @@ def test_hotkeys(app: RoachApp) -> None:
     check("虫巢爆发热键默认 Ctrl+Alt+B",
           app.config.get("app.hotkey_nest_burst") == "Ctrl+Alt+B",
           str(app.config.get("app.hotkey_nest_burst")))
-    check("状态接口覆盖三个热键", set(app.hotkey_status()) == {"console", "visible", "burst"},
+    check("蟑螂拍热键默认 Ctrl+Alt+S",
+          app.config.get("app.hotkey_swatter") == "Ctrl+Alt+S",
+          str(app.config.get("app.hotkey_swatter")))
+    check("状态接口覆盖四个热键",
+          set(app.hotkey_status()) == {"console", "visible", "burst", "swatter"},
           str(sorted(app.hotkey_status())))
 
 
@@ -578,7 +582,10 @@ def test_console_and_burst(app: RoachApp) -> None:
 
     w = app._settings_window
     check("控制台首页就是虫巢控制台", w.tabs.tabText(0).endswith("控制台"), w.tabs.tabText(0))
-    check("七个页签没有被挤成滚动箭头", w.tabs.count() == 7, f"{w.tabs.count()} 页")
+    bar = w.tabs.tabBar()
+    check("八个页签没有被挤成滚动箭头",
+          w.tabs.count() == 8 and bar.sizeHint().width() <= w.tabs.width(),
+          f"{w.tabs.count()} 页，页签宽 {bar.sizeHint().width()} / 可用 {w.tabs.width()}")
 
     # 3) 批量投放：数量正确，且自动截断到剩余容量
     app.clear_all()

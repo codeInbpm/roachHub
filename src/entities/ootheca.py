@@ -19,6 +19,9 @@ from ..utils.math_utils import Vector2D
 class Ootheca(BaseEntity):
     """写实大尺寸蟑螂卵鞘实体。"""
 
+    # 卵鞘不是生物，没有代谢：让它参与 NeedsSystem 会凭空掉血掉能量
+    metabolizes = False
+
     def __init__(
         self,
         x: float,

@@ -24,7 +24,8 @@ from pathlib import Path
 logger = logging.getLogger("roachHub.audio")
 
 _RATE = 44100
-_VERSION = "v1"
+# ⚠️ 改了 _SPECS 就必须升这个版本号：缓存目录按版本号建，不升会一直播旧的临时 WAV
+_VERSION = "v2"
 
 # 各音效的合成参数：长度(秒)、音色重心(Hz)、包络衰减指数
 _SPECS = {
@@ -32,13 +33,17 @@ _SPECS = {
     "rustle": (0.200, 4200.0, 9.0),
     "munch": (0.070, 1800.0, 34.0),
     "thud": (0.130, 320.0, 16.0),
+    # 拍中：湿爆。"啪"靠低频冲击，"唧"靠高通噪声爆裂
+    "splat": (0.180, 1400.0, 14.0),
+    # 拍空：短促气声，不能太响（挥空本来就该是"轻微尴尬"，不是奖励）
+    "whiff": (0.100, 2600.0, 22.0),
 }
 
 # 每类音效的并发实例数（池化复用，避免重复 play 时互相打断）
-_POOL = {"step": 8, "rustle": 3, "munch": 3, "thud": 2}
+_POOL = {"step": 8, "rustle": 3, "munch": 3, "thud": 2, "splat": 3, "whiff": 2}
 
 # 播放预算：step 计 1，其他计 3，合计不得超过 max_per_second
-_COST = {"step": 1, "rustle": 3, "munch": 3, "thud": 3}
+_COST = {"step": 1, "rustle": 3, "munch": 3, "thud": 3, "splat": 4, "whiff": 2}
 
 
 def _synth(kind: str) -> list[float]:
@@ -68,6 +73,19 @@ def _synth(kind: str) -> list[float]:
             # 低频撞击 + 一点体感
             env *= 0.6
             lowpass = lowpass * 0.35 + math.sin(math.tau * 95.0 * i / _RATE) * 0.6
+        elif kind == "splat":
+            # 90Hz 冲击（前 30ms）+ 高通噪声爆裂 + 一段湿尾巴 → "啪唧"
+            attack = min(1.0, t * 120.0)
+            thump = math.sin(math.tau * 90.0 * i / _RATE) * math.exp(-t * 9.0) * 0.62
+            burst = hpv * math.exp(-t * 13.0) * 0.88
+            tail = lowpass * math.exp(-t * 3.2) * 0.22
+            out.append((thump + burst + tail) * attack * 0.95)
+            continue
+        elif kind == "whiff":
+            # 空挥的气声：先扬后抑的高频噪声，没有任何低频
+            swell = (1.0 - math.exp(-t * 18.0)) * math.exp(-t * 4.5)
+            out.append(hpv * swell * 0.55)
+            continue
         out.append(lowpass * env * 0.9)
     return out
 

@@ -32,6 +32,7 @@ from PySide6.QtGui import (
 from .base_entity import BaseEntity, EntityState, LifeStage
 from ..resources import ResourceManager
 from ..animation import LegRig, AntennaRig, PoseBlender
+from ..animation.mating import MatingRig
 from ..utils.math_utils import Vector2D, clamp, angle_diff, normalize_angle
 
 # 姿态通道：(初始值, 平滑时间常数秒)
@@ -173,6 +174,12 @@ class Cockroach(BaseEntity):
         self.mating_partner_id: Optional[str] = None
         self.mating_duration: float = 2.2
         self.mating_progress: float = 0.0
+        # 交配动作（挺动相位 / 腹部挤压 / 心形粒子）。雄雌各一个，
+        # 参数按性别取，粒子只由雄虫生成（两头都生会叠成双倍亮度）。
+        self._mating_rig = MatingRig()
+        # 求偶驱力目标点：由繁殖系统写入，行为层消费（见 behavior.py）。
+        # 求偶必须能被"看见"——雄虫循着雌虫的气味走过去，而不是凭空受孕。
+        self.mate_seek: Optional[Vector2D] = None
 
         # 机动性
         speed_ratio = random.uniform(0.9, 1.15)
@@ -307,6 +314,7 @@ class Cockroach(BaseEntity):
         self.mating_partner_id = partner_id
         self.mating_duration = duration
         self.mating_progress = 0.0
+        self.mate_seek = None
         self.target_speed = 0.0
 
     def finish_mating(self) -> None:
@@ -314,11 +322,22 @@ class Cockroach(BaseEntity):
         self.state = EntityState.WALK
         self.mating_partner_id = None
         self.mating_progress = 0.0
+        self.mate_seek = None
+        self.target_speed = self.min_walk_speed
 
     def interrupt_mating(self) -> None:
-        """交尾受惊被打断。"""
+        """交尾受惊被打断。
+
+        关键：必须把状态放回行走。只清 partner_id 而不动 state 的话，雌虫会
+        永远停在 MATING —— 姿态是抽搐的定妆照、繁殖循环也再进不去（判定用的
+        是 state == MATING，而 partner 已经没了），等于整只虫报废。
+        """
         self.mating_partner_id = None
         self.mating_progress = 0.0
+        self.mate_seek = None
+        if self.state == EntityState.MATING:
+            self.state = EntityState.WALK
+            self.target_speed = self.min_walk_speed
 
     # ------------------------------------------------------------------ 动画更新
 
@@ -330,6 +349,20 @@ class Cockroach(BaseEntity):
 
         if self.state == EntityState.MATING:
             self.mating_progress += dt
+            # 结合处（尾端）的世界坐标，交给动作层撒心形 —— 心形要在世界坐标里飘，
+            # 不能挂在会随身体旋转的局部坐标上
+            tail_x = self.pos.x - math.cos(self.angle) * self.body_len * 0.46 * self.scale
+            tail_y = self.pos.y - math.sin(self.angle) * self.body_len * 0.46 * self.scale
+            self._mating_rig.update(
+                dt,
+                self.mating_progress / max(1e-3, self.mating_duration),
+                self.mating_duration,
+                self.gender,
+                junction=(tail_x, tail_y),
+            )
+        elif self._mating_rig.active:
+            # 打完/被打断：连粒子一起清掉，别让心形飘到下一段人生里
+            self._mating_rig.reset()
 
         self._anim_clock += dt
         self._tick_interaction(dt)
@@ -355,6 +388,16 @@ class Cockroach(BaseEntity):
             target["probe"] = 1.0
             target["ant_freq"] = max(target["ant_freq"], 6.8)
             target["ant_wave"] = max(target["ant_wave"], 0.26)
+        # 交配：让律动穿透姿态层 —— 六足随拍轻颤、重心随挤压下沉、
+        # 触须高频后扫。只改姿态通道，不改坐标，所以不影响配对判定。
+        if self.state == EntityState.MATING:
+            rig = self._mating_rig
+            beat = math.sin(rig.phase)
+            target["tremor"] = 0.28 + 0.26 * rig.energy
+            target["splay"] = 0.44 + 0.08 * rig.energy * (0.5 + 0.5 * beat)
+            target["anchored"] = 1.0
+            target["ant_freq"] = 11.0 + 8.0 * rig.energy
+            target["ant_wave"] = 0.28 + 0.10 * rig.energy
         self.pose.set_target(target)
         self.pose.step(dt)
 
@@ -614,7 +657,18 @@ class Cockroach(BaseEntity):
         painter.rotate(deg)
         # 步态造成的横向摆与轻微起伏；探嗅时整个身体向前探一点
         probe = self.pose.value("probe")
-        painter.translate(self.leg_rig.body_sway, self.leg_rig.body_bob - 1.5 * probe)
+        # 交配时的挺动：沿体轴（局部 +y = 尾部朝向对方）前后位移。
+        # 这只是绘制位移，不改 self.pos —— 配对距离、点击命中都还按真实坐标算。
+        mating_push = self._mating_rig.push if self.state == EntityState.MATING else 0.0
+        painter.translate(self.leg_rig.body_sway,
+                          self.leg_rig.body_bob - 1.5 * probe + mating_push)
+        # 再绕尾端扭摆：尾部是锁合点，所以身体是"绕着接点摆"，不是整体平移。
+        # 1.8° 在 70px 体长上让头部划出 ±2px 的弧，30fps 下能看清是在用力。
+        if self.state == EntityState.MATING:
+            tail_y = self.body_len * 0.46
+            painter.translate(0.0, tail_y)
+            painter.rotate(self._mating_rig.twist)
+            painter.translate(0.0, -tail_y)
         painter.scale(self.scale, self.scale)
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -645,8 +699,22 @@ class Cockroach(BaseEntity):
         if self._has_body_sprite or not realistic:
             self.leg_rig.draw(painter, palette, simple=simple_legs, detail=detail)
 
-        # 3. 躯干
-        if realistic:
+        # 2.5 交配光晕：从躯干缝隙里透出来的暖光，必须压在躯干下面
+        if self.state == EntityState.MATING:
+            self._mating_rig.draw_under(painter, self.body_len, self.gender, quality)
+
+        # 3. 躯干（交配时随挺动做纵向挤压：只有躯干在挤，六足不拉 ——
+        #    腿跟着缩放会像橡皮虫）
+        squeeze = self._mating_rig.squeeze if self.state == EntityState.MATING else 1.0
+        if abs(squeeze - 1.0) > 1e-3:
+            painter.save()
+            painter.scale(1.0, squeeze)
+            if realistic:
+                self._render_realistic_body(painter)
+            else:
+                self._render_simple_pipeline(painter)
+            painter.restore()
+        elif realistic:
             self._render_realistic_body(painter)
         else:
             self._render_simple_pipeline(painter)
@@ -659,14 +727,26 @@ class Cockroach(BaseEntity):
             detail=detail,
         )
 
-        # 5. 交配状态下尾部写实分泌黏液与结合脉动
+        # 5. 交配特效：每拍一圈扩散波纹 + 结合处湿光
         if self.state == EntityState.MATING:
-            self._render_mating_effects(painter)
+            self._mating_rig.draw_over(
+                painter, self.body_len, self.body_w, self.gender, quality
+            )
 
         if not vector_aa:
             painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
         painter.restore()
+
+    def render_mating_hearts(self, painter: QPainter) -> None:
+        """交配心形，单独一遍画在所有虫体之上。
+
+        不能塞在 ``render()`` 里：两只虫是分别 render 的，先画的那只撒的心形
+        会被后画的那只身体盖掉一半。这一遍由绘制循环在全部虫体之后调用。
+        """
+        if self.state != EntityState.MATING or not self._mating_rig.hearts:
+            return
+        self._mating_rig.draw_hearts(painter, painter.transform(), self.scale)
 
     @classmethod
     def _get_shadow_pixmap(cls) -> QPixmap:
@@ -749,22 +829,6 @@ class Cockroach(BaseEntity):
         if self.stage == LifeStage.NYMPH:
             return ResourceManager.get_sprite("cockroach_nymph")
         return ResourceManager.get_sprite("cockroach_adult")
-
-    def _render_mating_effects(self, painter: QPainter) -> None:
-        """交配时尾部结合处分泌出暗褐湿黏分泌物与脉冲生物光丝。"""
-        tail_y = self.body_len * 0.48
-        pulse = math.sin(self.mating_progress * 18.0)
-        mucus_alpha = int(140 + pulse * 60)
-
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(QColor(60, 30, 15, mucus_alpha)))
-        painter.drawEllipse(QRectF(-6.0, tail_y - 2.0, 12.0, 10.0))
-
-        painter.setBrush(QBrush(QColor(230, 200, 140, int(mucus_alpha * 0.8))))
-        painter.drawEllipse(QRectF(-2.5, tail_y + 1.0, 5.0, 4.0))
-
-        painter.setPen(QPen(QColor(180, 110, 50, int(mucus_alpha * 0.5)), 1.5))
-        painter.drawLine(QPointF(-4.0, tail_y + 4.0), QPointF(4.0, tail_y + 4.0))
 
     # ------------------------------------------------------------- 矢量躯干
 

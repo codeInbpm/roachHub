@@ -13,10 +13,16 @@ from PySide6.QtGui import (
     QRegion,
     QGuiApplication,
     QCursor,
+    QColor,
+    QFont,
+    QPen,
+    QBrush,
 )
 from PySide6.QtWidgets import QWidget
 
 from .entities.base_entity import BaseEntity
+from .systems.splatter import SplatterSystem
+from .systems.swatter import Swatter
 from .systems.trails import TrailCanvas
 from .utils.math_utils import Vector2D
 from .utils.platform_utils import PlatformManager
@@ -51,6 +57,10 @@ class OverlayWindow(QWidget):
         self._drag_grab_offset = Vector2D(0.0, 0.0)
         self.drag_enabled: bool = True
 
+        # 苍蝇拍与爆浆特效（由 app 注入；缺省时全部为空操作）
+        self.swatter: Optional[Swatter] = None
+        self.splatter: Optional[SplatterSystem] = None
+
         # 鼠标穿透策略：Windows 走 WM_NCHITTEST（不碰窗口形状），其它平台退回
         # QRegion 遮罩（低频更新）。详见 utils/win_hit_test.py 的说明。
         self._native_hit_test = supports_native_hit_test()
@@ -72,6 +82,13 @@ class OverlayWindow(QWidget):
         self._work_rect: Optional[QRect] = None
         self._mask_timer = 0.0
         self._paint_ms = 0.0
+
+        # 悬停卡片：默认什么都不显示，鼠标停在蟑螂身上（或点过它）才浮出
+        # 能量/健康/状态。刻意不做成全屏 HUD —— 那会让桌面一直挂着一层
+        # "调试信息"，跟"伪装成真虫子"这个前提冲突。
+        self._hover_entity: Optional[BaseEntity] = None
+        self._hover_until: float = 0.0
+        self._hover_ms: float = 0.0
         self._paint_trails_ms = 0.0
         self._paint_calls = 0
         self._paint_t0 = 0.0
@@ -100,7 +117,7 @@ class OverlayWindow(QWidget):
             # 必须在窗口创建之后安装（要拿 hwnd）
             self._hit_filter = ClickThroughFilter(
                 self,
-                hit_test=lambda x, y: self.hit_test_at(x, y) is not None,
+                hit_test=self.accepts_mouse_at,
                 interactive=lambda: self._is_visible_state,
             )
             QGuiApplication.instance().installNativeEventFilter(self._hit_filter)
@@ -178,9 +195,191 @@ class OverlayWindow(QWidget):
     def set_entities(self, entities: List[BaseEntity]) -> None:
         """更新当前帧待渲染的全部生态实体（蟑螂、卵鞘、食物）。"""
         self.entities = entities
+        self._refresh_hover()
         if not self._native_hit_test:
             self._update_click_mask()
         self.update()
+
+    # -------------------------------------------------------------- 悬停卡片
+
+    def _refresh_hover(self) -> None:
+        """每帧用全局光标重新判定悬停对象。
+
+        不能用 mouseMoveEvent 记下的位置：蟑螂会自己跑开，鼠标不动的话
+        事件不再来，卡片就会一直挂在原处。用 ``QCursor.pos()`` 每帧重算，
+        卡片自然跟着虫走。
+
+        代价：一次 ``hit_test_at``（200 只时约 0.1ms，且带平方距离预筛）。
+        只在覆盖层可见时执行，持拍时直接跳过。
+        """
+        t0 = time.perf_counter()
+        try:
+            sw = self.swatter
+            if sw is not None and sw.armed:
+                self._hover_entity = None
+                return
+
+            cur = self._hover_entity
+            if cur is not None and not cur.is_alive:
+                self._hover_entity = None
+                cur = None
+
+            g = QCursor.pos()
+            local = self.mapFromGlobal(g)
+            hit: Optional[BaseEntity] = None
+            if self.rect().contains(local):
+                hit = self.hit_test_at(float(local.x()), float(local.y()))
+
+            if hit is not None and hit.__class__.__name__ == "Cockroach":
+                self._hover_entity = hit
+                # 悬停状态每帧续期；停手后 0.3s 自动收起
+                self._hover_until = time.monotonic() + 0.30
+            elif cur is None or time.monotonic() > self._hover_until:
+                self._hover_entity = None
+        finally:
+            self._hover_ms = (time.perf_counter() - t0) * 1000.0
+
+    def _render_hover_card(self, painter: QPainter) -> None:
+        """在悬停个体旁边画一张小卡片：能量 / 健康 / 状态。
+
+        默认不画 —— 桌面平时必须是"干净的桌面"，这些数字只在用户主动
+        指向某只虫时才浮出来。
+        """
+        e = self._hover_entity
+        if e is None or not getattr(e, "is_alive", False):
+            return
+        if e.__class__.__name__ != "Cockroach":
+            return
+
+        # 取消挖空裁剪：卡片画在面板边缘时不该被切掉半张
+        painter.save()
+        painter.setClipping(False)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+        w, h = 158.0, 88.0
+        px, py = e.pos.x, e.pos.y
+        x = px + max(28.0, e.width * 0.5 + 16.0)
+        if x + w > self.width() - 8.0:
+            x = px - max(28.0, e.width * 0.5 + 16.0) - w
+        y = py - h * 0.5
+        x = max(8.0, min(x, self.width() - w - 8.0))
+        y = max(8.0, min(y, self.height() - h - 8.0))
+
+        card = QRectF(x, y, w, h)
+        painter.setPen(QPen(QColor(255, 255, 255, 42), 1.0))
+        painter.setBrush(QBrush(QColor(18, 20, 24, 238)))
+        painter.drawRoundedRect(card, 9.0, 9.0)
+
+        # 标题：阶段 + 性别（雌虫顺带标出还能产几次）
+        title_font = QFont("Microsoft YaHei UI", 9)
+        title_font.setBold(True)
+        painter.setFont(title_font)
+        painter.setPen(QColor(242, 243, 245))
+
+        if getattr(e, "stage", None) is not None and e.stage.name == "NYMPH":
+            title = f"若虫 {getattr(e, 'instar', 1)} 龄"
+        else:
+            gender = "♀" if getattr(e, "gender", "female") == "female" else "♂"
+            title = f"成虫 {gender}"
+        painter.drawText(QRectF(x + 11, y + 7, w - 60, 16),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, title)
+
+        if e.stage.name != "NYMPH":
+            broods = int(getattr(e, "broods_left", 0))
+            tag = f"可产卵 {broods}" if broods > 0 else "待受精"
+            painter.setFont(QFont("Microsoft YaHei UI", 8))
+            painter.setPen(QColor(150, 154, 162))
+            painter.drawText(QRectF(x + 11, y + 7, w - 22, 16),
+                             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, tag)
+
+        energy = float(getattr(e, "energy", 0.0))
+        health = float(getattr(e, "health", 100.0))
+        self._draw_stat_bar(painter, x + 11, y + 27, w - 22, "能量", energy,
+                            self._energy_color(energy), f"{energy:.0f}")
+        self._draw_stat_bar(painter, x + 11, y + 49, w - 22, "健康", health,
+                            self._health_color(health), f"{health:.0f}")
+
+        text, color = self._hover_status(e, energy, health)
+        painter.setFont(QFont("Microsoft YaHei UI", 8))
+        painter.setPen(color)
+        painter.drawText(QRectF(x + 11, y + 68, w - 22, 14),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
+        painter.restore()
+
+    @staticmethod
+    def _draw_stat_bar(
+        p: QPainter, x: float, y: float, w: float,
+        label: str, value: float, color: QColor, text: str,
+    ) -> None:
+        p.setFont(QFont("Microsoft YaHei UI", 8))
+        p.setPen(QColor(148, 152, 160))
+        p.drawText(QRectF(x, y, w * 0.7, 13),
+                   Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, label)
+        p.setPen(QColor(228, 230, 234))
+        p.drawText(QRectF(x, y, w, 13),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, text)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 26))
+        p.drawRoundedRect(QRectF(x, y + 14.0, w, 4.5), 2.2, 2.2)
+        frac = max(0.0, min(1.0, value / 100.0))
+        if frac > 0.0:
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF(x, y + 14.0, max(2.5, w * frac), 4.5), 2.2, 2.2)
+
+    @staticmethod
+    def _energy_color(v: float) -> QColor:
+        if v <= 0.0:
+            return QColor(226, 75, 74)
+        if v < 20.0:
+            return QColor(232, 138, 62)
+        if v < 45.0:
+            return QColor(224, 176, 64)
+        return QColor(96, 186, 120)
+
+    @staticmethod
+    def _health_color(v: float) -> QColor:
+        if v < 40.0:
+            return QColor(226, 75, 74)
+        if v < 85.0:
+            return QColor(224, 176, 64)
+        return QColor(96, 186, 120)
+
+    @staticmethod
+    def _hover_status(e: BaseEntity, energy: float, health: float) -> tuple[str, QColor]:
+        """一句话说清"它现在怎么样" —— 这是识别"会不会饿死"的入口。"""
+        red = QColor(236, 110, 108)
+        orange = QColor(240, 156, 84)
+        amber = QColor(230, 190, 96)
+        green = QColor(126, 200, 142)
+        gray = QColor(160, 164, 170)
+
+        if energy <= 0.0:
+            return ("能量耗尽 · 正在掉血，约 0.7 秒后死亡" if health > 0.0 else "已饿死", red)
+        if energy < 20.0:
+            return "饥饿 · 速度已下降，走不远了", orange
+        if energy < 40.0:
+            return "偏饿 · 正在四处找吃的", amber
+
+        state_name = getattr(getattr(e, "state", None), "name", "")
+        if state_name == "MATING":
+            # 带上进度：交配是唯一"有明确终点"的状态，光写"交尾中"看不出还要等多久
+            dur = float(getattr(e, "mating_duration", 0.0) or 0.0)
+            prog = float(getattr(e, "mating_progress", 0.0))
+            pct = int(round(100.0 * prog / dur)) if dur > 1e-3 else 0
+            return f"交尾中 · {max(0, min(99, pct))}%", QColor(186, 150, 240)
+        if state_name == "DRAGGED":
+            return "被捏住了", QColor(130, 176, 240)
+        if state_name in ("PANIC", "FREEZE"):
+            return "受惊 · 糖原在烧", orange
+        if state_name == "EAT":
+            return "进食中", green
+        if state_name == "MOLTING":
+            return "蜕皮中", gray
+        if health < 60.0:
+            return "体力未恢复 · 需要进食", amber
+        return "状态良好", green
 
     def _update_click_mask(self) -> None:
         """非 Windows 平台的兜底：QRegion 遮罩。
@@ -191,7 +390,19 @@ class OverlayWindow(QWidget):
         if self._native_hit_test:
             return
 
-        if not self._is_visible_state or not self.entities:
+        if not self._is_visible_state:
+            self.setMask(QRegion())
+            return
+
+        # 持拍时整屏接管（非 Windows 的兜底路径；Windows 走 NCHITTEST）
+        if self.swatter is not None and self.swatter.armed:
+            combined = QRegion(self._work_rect) if self._work_rect is not None else QRegion(self.rect())
+            if self._hole_region is not None:
+                combined = combined.subtracted(self._hole_region)
+            self.setMask(combined)
+            return
+
+        if not self.entities:
             self.setMask(QRegion())
             return
 
@@ -235,6 +446,10 @@ class OverlayWindow(QWidget):
 
     def add_smear(self, wx: float, wy: float, angle: float, length: float) -> None:
         self.trails.add_smear(wx, wy, angle, length)
+
+    def add_splat(self, wx: float, wy: float, radius: float = 24.0) -> None:
+        """拍死的虫往痕迹层甩几滴（主污渍在尸体上，这里只留飞溅）。"""
+        self.trails.add_splat(wx, wy, radius)
 
     def tick_trails(self, dt: float) -> None:
         self.trails.tick(dt)
@@ -284,6 +499,51 @@ class OverlayWindow(QWidget):
                 return entity
         return None
 
+    def accepts_mouse_at(self, x: float, y: float) -> bool:
+        """这个点要不要接管鼠标（`WM_NCHITTEST` 的唯一判据）。
+
+        `ClickThroughFilter` 的回调只吃 `bool`，而 `hit_test_at` 返回的是实体，
+        所以中间必须有这一层。两件事在这里合流：
+
+        * 平时：命中实体才认领（保持"只在蟑螂身上接收鼠标"的老行为）；
+        * 持拍时：**整屏认领**，但仍然让出控制台面板的洞与任务栏 ——
+          空拍必须有反馈，否则挥空毫无手感；而右下角必须永远点得动。
+
+        不改这一处，症状是"每次挥空都在框选桌面图标"：程序不报错、拍子照样
+        跟着动，但每一下空拍都在桌面上拉出一个选择框。
+        """
+        if not self._is_visible_state:
+            return False
+        ix, iy = int(x), int(y)
+        hole = self._hole_region
+        if hole is not None and hole.contains(QPoint(ix, iy)):
+            return False
+        work = self._work_rect
+        if work is not None and not work.contains(ix, iy):
+            return False
+        sw = self.swatter
+        if sw is not None and sw.armed:
+            return True
+        return self.hit_test_at(x, y) is not None
+
+    def attach_swatter(self, swatter: Optional[Swatter]) -> None:
+        """注入拍子。只做持有，回调接线由 app 负责（它还要同步托盘文案）。"""
+        self.swatter = swatter
+
+    def sync_swatter_cursor(self) -> None:
+        """持拍时藏光标（拍面中心那个小点才是真正的准星），放下立刻还原。
+
+        收拍**必须**还原成 ArrowCursor：不还原，用户会觉得"鼠标没了"。
+        """
+        if self.swatter is not None and self.swatter.armed:
+            self.setCursor(Qt.CursorShape.BlankCursor)
+        else:
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        if not self._native_hit_test:
+            # 遮罩路径平时 4Hz 才更新一次；拿起/放下要立刻生效
+            self._update_click_mask()
+        self.update()
+
     @staticmethod
     def _hit_radius(entity: BaseEntity) -> float:
         """包围椭圆的保守外接半径（含 1.35 的命中裕量与 4px 边缘）。"""
@@ -299,7 +559,20 @@ class OverlayWindow(QWidget):
         return self.hit_test_at(x, y)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
-        """命中生物即"捏住"它；命中其它物体仍按点击处理。"""
+        """持拍时左键=挥拍、右键=放下；否则命中生物即"捏住"它。"""
+        sw = self.swatter
+        if sw is not None and sw.armed:
+            # 持拍期间整屏的鼠标都归我们：这里必须在最前面截断，
+            # 否则左键会先走去拖拽，把"拍"变成"捏"。
+            if event.button() == Qt.MouseButton.RightButton:
+                sw.disarm("right_click")
+            elif event.button() == Qt.MouseButton.LeftButton:
+                p = event.position()
+                gp = self.mapToGlobal(QPoint(int(p.x()), int(p.y())))
+                sw.swing(Vector2D(float(gp.x()), float(gp.y())))
+            event.accept()
+            return
+
         if event.button() == Qt.MouseButton.LeftButton:
             click_point = event.position()
             cx, cy = click_point.x(), click_point.y()
@@ -322,12 +595,21 @@ class OverlayWindow(QWidget):
                     hit_entity.on_click(click_vec)
                 if self.on_entity_clicked:
                     self.on_entity_clicked(hit_entity, click_vec)
+                # 点过之后卡片钉住 4 秒：鼠标一移开就消失的话，等于什么都没看到
+                if hit_entity.__class__.__name__ == "Cockroach":
+                    self._hover_entity = hit_entity
+                    self._hover_until = time.monotonic() + 4.0
                 event.accept()
                 return
 
         event.ignore()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        # 持拍时位置由 app 每帧读全局光标驱动（比事件更稳），这里不改光标形状
+        if self.swatter is not None and self.swatter.armed:
+            event.accept()
+            return
+
         pos = event.position()
         if self._drag_entity is not None:
             target = Vector2D(
@@ -349,6 +631,9 @@ class OverlayWindow(QWidget):
         event.ignore()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if self.swatter is not None and self.swatter.armed:
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.LeftButton and self._drag_entity is not None:
             entity = self._drag_entity
             self._drag_entity = None
@@ -364,7 +649,7 @@ class OverlayWindow(QWidget):
         event.ignore()
 
     def paintEvent(self, event: QPaintEvent) -> None:
-        """按层级分步绘制：痕迹 -> 食物 -> 卵鞘 -> 蟑螂。"""
+        """按层级分步绘制：痕迹 -> 空壳/尸体 -> 食物 -> 卵鞘 -> 蟑螂 -> 爆浆 -> 拍子。"""
         if not self._is_visible_state:
             return
 
@@ -384,10 +669,19 @@ class OverlayWindow(QWidget):
             self.trails.render(painter)
             self._paint_trails_ms = (time.perf_counter() - _t) * 1000.0
 
-            # 1. 绘制底层食物
+            # 震屏只 translate 绘制，绝不改 entity.pos ——
+            # 否则蟑螂会被"震"进面板的洞里、震到墙外，物理系统还要写补丁。
+            # 痕迹层不参与震动（它是桌面本身，抖起来反而穿帮）。
+            shake = self.splatter.shake_offset() if self.splatter is not None else (0.0, 0.0)
+            if shake != (0.0, 0.0):
+                painter.translate(shake[0], shake[1])
+
+            # 1. 空壳与尸体（都趴在桌面上，压在活虫下面）
             for entity in self.entities:
                 if entity.is_alive and entity.__class__.__name__ == "Exuvia":
-                    # 蜕下的空壳躺在桌面上，压在蟑螂下面、盖在痕迹上面
+                    entity.render(painter)
+            for entity in self.entities:
+                if entity.is_alive and entity.__class__.__name__ == "SquashedRoach":
                     entity.render(painter)
 
             for entity in self.entities:
@@ -405,6 +699,26 @@ class OverlayWindow(QWidget):
                 if entity.is_alive and entity.__class__.__name__ == "Cockroach":
                     entity.render(painter)
             self._paint_entities_ms = (time.perf_counter() - _t) * 1000.0
+
+            # 3.5 交配心形：等所有虫体都画完再叠一层。
+            #     塞在单只虫的 render 里的话，先画的那只撒的心形会被另一只挡住一半。
+            for entity in self.entities:
+                if entity.is_alive and entity.__class__.__name__ == "Cockroach":
+                    entity.render_mating_hearts(painter)
+
+            # 4. 爆浆：颗粒 / 冲击环 / 白闪（压在虫身上，"糊一脸"才对）
+            if self.splatter is not None:
+                self.splatter.render(painter)
+
+            if shake != (0.0, 0.0):
+                painter.translate(-shake[0], -shake[1])
+
+            # 4.5 悬停卡片：压在虫身上、拍子之下，不参与震屏
+            self._render_hover_card(painter)
+
+            # 5. 拍子永远在最上面，而且**不参与震屏**（否则准星会飘）
+            if self.swatter is not None:
+                self.swatter.render(painter, float(self.width()), float(self.height()))
         finally:
             painter.end()
             self._paint_ms = (time.perf_counter() - t0) * 1000.0

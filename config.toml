@@ -12,6 +12,7 @@ open_console_on_start = true
 hotkey_toggle_console = "Ctrl+Alt+R"
 hotkey_toggle_visible = "Ctrl+Alt+H"
 hotkey_nest_burst = "Ctrl+Alt+B"
+hotkey_swatter = "Ctrl+Alt+S"
 
 [render]
 style = "realistic"
@@ -26,6 +27,22 @@ multi_screen = false
 [interaction]
 drag_enabled = true
 
+[swatter]
+enabled = true
+head_radius = 44.0
+visual_scale = 0.7
+swing_ms = 70
+recover_ms = 200
+cooldown_ms = 280
+idle_disarm_seconds = 12.0
+splat_amount = 1.0
+linger_seconds = 22.0
+max_particles = 14
+screen_shake = true
+scare_radius = 240.0
+can_squash_ootheca = true
+count_kills = true
+
 [trails]
 enabled = true
 resolution_scale = 1.0
@@ -34,7 +51,7 @@ max_prints = 3000
 
 [audio]
 enabled = true
-volume = 0.55
+volume = 0.45
 max_per_second = 18
 
 [grab_voice]
@@ -42,6 +59,11 @@ enabled = true
 volume = 0.5
 file = "assets/sounds/grab.wav"
 stop_on_release = false
+
+[squash_voice]
+enabled = true
+volume = 0.75
+variant = "myinstants"
 
 [performance]
 fixed_quality = false
@@ -55,6 +77,7 @@ boundary_padding = 45.0
 boundary_behavior = "rebound"
 food_spawn_interval = 12.0
 max_food_count = 8
+food_kind = "random"
 
 [behavior]
 thigmotaxis_weight = 0.55
@@ -72,6 +95,9 @@ reproduce_min_energy = 55.0
 reproduce_cost_energy = 25.0
 reproduce_cooldown = 14.0
 allow_reproduce_near_cap = true
+fertilized_broods = 2
+auto_mating_time = 1.5
+mating_duration = 2.2
 ootheca_mode = "random"
 egg_incubation_time = 15.0
 nymphs_per_ootheca_min = 1

@@ -29,6 +29,7 @@ class Exuvia(BaseEntity):
     """蜕下的空壳。不可抓、不可吓、不计数。"""
 
     interactive = False
+    metabolizes = False
 
     def __init__(
         self,

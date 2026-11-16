@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import math
+import random
 
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QImage, QPainter, QPixmap, QRadialGradient
@@ -42,6 +43,7 @@ class TrailCanvas:
         # 改成攒到 tick() 里一次性画完，整帧只开一个 QPainter。
         self._pending_fp: list[tuple[float, float, float, float]] = []
         self._pending_sm: list[tuple[float, float, float, float]] = []
+        self._pending_sp: list[tuple[float, float, float]] = []   # 拍击飞溅的小斑点
         self._max_pending = 600
 
         self.image = QImage(1, 1, QImage.Format.Format_ARGB32_Premultiplied)
@@ -70,6 +72,7 @@ class TrailCanvas:
         self._has_content = False
         self._pending_fp.clear()
         self._pending_sm.clear()
+        self._pending_sp.clear()
 
     def clear(self) -> None:
         self.image.fill(Qt.GlobalColor.transparent)
@@ -80,6 +83,7 @@ class TrailCanvas:
         self._fade_acc = 0.0
         self._pending_fp.clear()
         self._pending_sm.clear()
+        self._pending_sp.clear()
 
     # ------------------------------------------------------------------ 落笔
 
@@ -119,9 +123,48 @@ class TrailCanvas:
         self._has_content = True
         self._since_add = 0.0
 
+    def add_splat(self, wx: float, wy: float, radius: float = 24.0) -> None:
+        """拍死一只虫时，往痕迹层甩几枚小斑点 + 一条细拖尾。
+
+        主污渍是挂在尸体上的（22 秒后随尸体一起消失），这里只留"溅出去的那几滴"，
+        它们按痕迹层的正常节奏淡出 —— 于是爆完几秒后桌上还有一点点痕迹，
+        但不会永远脏着。打空**不**调这个（空拍不留污渍）。
+        """
+        if not self.enabled:
+            return
+        x = wx * self.scale
+        y = wy * self.scale
+        if not (0.0 <= x < self.width and 0.0 <= y < self.height):
+            return
+        n0 = len(self._pending_sp)
+        for _ in range(random.randint(3, 6)):
+            a = random.uniform(0.0, math.tau)
+            dist = radius * self.scale * random.uniform(0.55, 1.55)
+            r = max(1.0, radius * self.scale * random.uniform(0.07, 0.20))
+            sx = x + math.cos(a) * dist
+            sy = y + math.sin(a) * dist
+            if 0.0 <= sx < self.width and 0.0 <= sy < self.height:
+                self._pending_sp.append((sx, sy, r))
+
+        # 一条顺着力道甩出去的细拖尾
+        a = random.uniform(0.0, math.tau)
+        steps = 4
+        for i in range(1, steps + 1):
+            dist = radius * self.scale * (1.1 + 0.32 * i)
+            r = max(0.8, radius * self.scale * (0.14 - 0.025 * i))
+            sx = x + math.cos(a) * dist
+            sy = y + math.sin(a) * dist
+            if 0.0 <= sx < self.width and 0.0 <= sy < self.height:
+                self._pending_sp.append((sx, sy, r))
+
+        self.count += len(self._pending_sp) - n0
+        self.total_prints += 1
+        self._has_content = True
+        self._since_add = 0.0
+
     def _flush(self) -> None:
-        """把这一帧攒下的足迹 / 油渍一次画完。"""
-        if not self._pending_fp and not self._pending_sm:
+        """把这一帧攒下的足迹 / 油渍 / 飞溅一次画完。"""
+        if not self._pending_fp and not self._pending_sm and not self._pending_sp:
             return
 
         p = QPainter(self.image)
@@ -154,10 +197,19 @@ class TrailCanvas:
                 p.rotate(math.degrees(angle))
                 p.drawPixmap(QRectF(-w / 2.0, -h / 2.0, w, h), stamp, src)
                 p.restore()
+            p.setOpacity(1.0)
+
+        # 拍击飞溅：几点深褐 + 拖尾（"溅出去的那几滴"，不会随尸体消失）
+        if self._pending_sp:
+            p.setBrush(QBrush(QColor(72, 46, 22, 158)))
+            for x, y, r in self._pending_sp:
+                p.drawEllipse(QPointF(x, y), r, r * 0.82)
+
         p.end()
 
         self._pending_fp.clear()
         self._pending_sm.clear()
+        self._pending_sp.clear()
 
     @classmethod
     def _get_smear_stamp(cls) -> QPixmap:
